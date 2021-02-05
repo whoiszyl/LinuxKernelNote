@@ -497,6 +497,7 @@ static int esp_init_authenc(struct xfrm_state *x)
 	unsigned int keylen;
 	int err;
 
+	// ESP加密算法是必须的
 	err = -EINVAL;
 	if (x->ealg == NULL)
 		goto error;

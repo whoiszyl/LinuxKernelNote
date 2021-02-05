@@ -72,11 +72,11 @@ struct net {
 	struct sock 		*rtnl;			/* rtnetlink socket */
 	struct sock		*genl_sock;
 
-	struct list_head 	dev_base_head;
-	struct hlist_head 	*dev_name_head;
-	struct hlist_head	*dev_index_head;
+	struct list_head 	dev_base_head;//指向一个包含所有网络设备的链表
+	struct hlist_head 	*dev_name_head;//指向一个包含所有网络设备的散列表，键为网络设备名
+	struct hlist_head	*dev_index_head;//指向一个包含所有网络设备的散列表，键为网络设备索引
 	unsigned int		dev_base_seq;	/* protected by rtnl_mutex */
-	int			ifindex;
+	int			ifindex;      //网络命名空间中分配的最有一个设备索引
 	unsigned int		dev_unreg_count;
 
 	/* core fib_rules */
@@ -88,7 +88,7 @@ struct net {
 	struct netns_mib	mib;
 	struct netns_packet	packet;
 	struct netns_unix	unx;
-	struct netns_ipv4	ipv4;
+	struct netns_ipv4	ipv4; //管理表信息
 #if IS_ENABLED(CONFIG_IPV6)
 	struct netns_ipv6	ipv6;
 #endif

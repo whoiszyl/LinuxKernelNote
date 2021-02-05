@@ -7,50 +7,56 @@
 #define XT_EXTENSION_MAXNAMELEN 29
 #define XT_TABLE_MAXNAMELEN 32
 
+/*这个结构存储match的信息，这里的匹配主要是指与IP无关的防火墙规则信息。由系统缺
+省设置的匹配主要有三个“tcp”、“udp”，“icmp”*/
 struct xt_entry_match {
 	union {
 		struct {
-			__u16 match_size;
+			__u16 match_size;//match尺寸
 
 			/* Used by userspace */
-			char name[XT_EXTENSION_MAXNAMELEN];
+			char name[XT_EXTENSION_MAXNAMELEN];//match名称
 			__u8 revision;
-		} user;
+		} user;//用户空间使用的match信息
 		struct {
-			__u16 match_size;
+			__u16 match_size;//match尺寸
 
 			/* Used inside the kernel */
-			struct xt_match *match;
-		} kernel;
+			struct xt_match *match;//具体的match
+		} kernel;//内核空间使用的match信息
 
 		/* Total length */
-		__u16 match_size;
+		__u16 match_size;//match总尺寸
 	} u;
 
-	unsigned char data[0];
+	unsigned char data[0];//match信息，可变数据区
 };
 
+/* target结构信息，是决定一个分组命运的信息。也可以理解为action信息，其意义是指
+当一个分组与rule和match信息匹配后，如何处置该分组。处置方法一般有三种：一，命令
+常数，比如DROP ACCEPT等等；二 系统预定义的模块处理函数，比如”SNAT DNAT"等等；
+第三种是用户自己写模块函数。 */
 struct xt_entry_target {
 	union {
 		struct {
-			__u16 target_size;
+			__u16 target_size;//target尺寸
 
 			/* Used by userspace */
-			char name[XT_EXTENSION_MAXNAMELEN];
+			char name[XT_EXTENSION_MAXNAMELEN];//target名称
 			__u8 revision;
-		} user;
+		} user;//用户空间使用的target信息
 		struct {
-			__u16 target_size;
+			__u16 target_size;//target尺寸
 
 			/* Used inside the kernel */
-			struct xt_target *target;
-		} kernel;
+			struct xt_target *target;//具体的target
+		} kernel;//内核空间使用的targe信息
 
 		/* Total length */
-		__u16 target_size;
+		__u16 target_size;//targe总尺寸
 	} u;
 
-	unsigned char data[0];
+	unsigned char data[0];//targe信息，可变数据区
 };
 
 #define XT_TARGET_INIT(__name, __size)					       \
@@ -60,7 +66,7 @@ struct xt_entry_target {
 		.name		= __name,				       \
 	},								       \
 }
-
+/*这个结构已经很明显给出了target的形式：命令常数或者模块函数。 */
 struct xt_standard_target {
 	struct xt_entry_target target;
 	int verdict;
@@ -106,11 +112,14 @@ struct _xt_align {
 #define SET_COUNTER(c,b,p) do { (c).bcnt = (b); (c).pcnt = (p); } while(0)
 #define ADD_COUNTER(c,b,p) do { (c).bcnt += (b); (c).pcnt += (p); } while(0)
 
+/*计数器结构，每一个rule都有一个计数器结构用来统计匹配该条规则的分组数目和字节数
+目。为基于统计的安全工具提供分析基础。*/
 struct xt_counters {
 	__u64 pcnt, bcnt;			/* Packet and byte counters */
 };
 
 /* The argument to IPT_SO_ADD_COUNTERS. */
+//这个更改计数器时传递的参数类型。 
 struct xt_counters_info {
 	/* Which table. */
 	char name[XT_TABLE_MAXNAMELEN];
@@ -131,11 +140,16 @@ struct xt_counters_info {
 	int __ret = 0;						\
 	struct xt_entry_match *__m;				\
 								\
+/*首先__i取值为ipt_entry结构的大小，实质上就是match匹配
+的开始处的偏移地址，将其与e相加就得到了match匹配的地址，然后调用fn处理这个匹配
+。如果函数返回值为零，当前匹配的偏移地址加上当前匹配的大小，如果不超过target的
+偏移地址，则继续处理下一条匹配。 */
 	for (__i = sizeof(type);				\
 	     __i < (e)->target_offset;				\
-	     __i += __m->u.match_size) {			\
-		__m = (void *)e + __i;				\
-								\
+	     __i += __m->u.match_size) {			\//在这里得到的I就是对应的match的偏移
+		__m = (void *)e + __i;				\//在这里的match的地址
+							\
+		//没找到一个match，就交由fn函数处理，在print_firewall中，传递过来的是函数print_match
 		__ret = fn(__m , ## args);			\
 		if (__ret != 0)					\
 			break;					\

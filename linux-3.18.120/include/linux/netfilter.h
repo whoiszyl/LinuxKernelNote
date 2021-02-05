@@ -98,6 +98,7 @@ void nf_unregister_hooks(struct nf_hook_ops *reg, unsigned int n);
 int nf_register_sockopt(struct nf_sockopt_ops *reg);
 void nf_unregister_sockopt(struct nf_sockopt_ops *reg);
 
+//行数 NFPROTO_NUMPROTO 为 13，即目前内核所支持的最大协议簇；列数 NF_MAX_HOOKS 为挂载点的个数
 extern struct list_head nf_hooks[NFPROTO_NUMPROTO][NF_MAX_HOOKS];
 
 #ifdef HAVE_JUMP_LABEL
@@ -293,6 +294,15 @@ nf_nat_decode_session(struct sk_buff *skb, struct flowi *fl, u_int8_t family)
 }
 
 #else /* !CONFIG_NETFILTER */
+/*	pf：协议族名，Netfilter架构同样可以用于IP层之外，因此这个变量还可以有诸如PF_INET6，PF_DECnet等名字。
+	hook：HOOK点的名字，对于IP层，就是取上面的五个值；
+	skb：不解释；
+	indev：数据包进来的设备，以struct net_device结构表示；
+	outdev：数据包出去的设备，以struct net_device结构表示；
+	(后面可以看到，以上五个参数将传递给nf_register_hook中注册的处理函数。)
+	okfn:是个函数指针，当所有的该HOOK点的所有登记函数调用完后，转而走此流程。
+*/
+
 #define NF_HOOK(pf, hook, skb, indev, outdev, okfn) (okfn)(skb)
 #define NF_HOOK_COND(pf, hook, skb, indev, outdev, okfn, cond) (okfn)(skb)
 static inline int nf_hook_thresh(u_int8_t pf, unsigned int hook,

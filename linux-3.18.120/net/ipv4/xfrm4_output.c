@@ -80,10 +80,13 @@ int xfrm4_output_finish(struct sk_buff *skb)
 	return xfrm_output(skb);
 }
 
+// 发送结束处理
 static int __xfrm4_output(struct sk_buff *skb)
 {
 	struct xfrm_state *x = skb_dst(skb)->xfrm;
-
+	
+// 如果内核定义了NETFILTER, 当到达最后一个路由(普通路由)时, 设置IPSKB_REROUTED
+// 标志, 进行普通路由发出函数(ip_output), 设置该标志后不进行源NAT操作
 #ifdef CONFIG_NETFILTER
 	if (!x) {
 		IPCB(skb)->flags |= IPSKB_REROUTED;
@@ -96,6 +99,11 @@ static int __xfrm4_output(struct sk_buff *skb)
 
 int xfrm4_output(struct sock *sk, struct sk_buff *skb)
 {
+	// 就是一个条件HOOK, 当skb包不带IPSKB_REROUTED标志时进入POSTROUTING点的NAT操作
+	// 这是数据在xfrm策略中多个bundle时会多次调用, 也就是数据在封装完成前可以进行
+	// 源NAT操作
+	// HOOK出口函数为__xfrm4_output
+
 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING, skb,
 			    NULL, skb_dst(skb)->dev, __xfrm4_output,
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));

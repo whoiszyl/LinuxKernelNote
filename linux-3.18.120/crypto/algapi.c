@@ -456,12 +456,15 @@ int crypto_register_template(struct crypto_template *tmpl)
 
 	crypto_check_module_sig(tmpl->module);
 
+	//遍历crypto_template_list，看当前模板是否被注册
 	list_for_each_entry(q, &crypto_template_list, list) {
 		if (q == tmpl)
 			goto out;
 	}
 
+	//注册之
 	list_add(&tmpl->list, &crypto_template_list);
+	//事件通告
 	crypto_notify(CRYPTO_MSG_TMPL_REGISTER, tmpl);
 	err = 0;
 out:
@@ -470,6 +473,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(crypto_register_template);
 
+//注销算法模版
 void crypto_unregister_template(struct crypto_template *tmpl)
 {
 	struct crypto_instance *inst;
@@ -480,8 +484,10 @@ void crypto_unregister_template(struct crypto_template *tmpl)
 	down_write(&crypto_alg_sem);
 
 	BUG_ON(list_empty(&tmpl->list));
+	//注销算法模版，并重新初始化模版的list成员
 	list_del_init(&tmpl->list);
 
+	//首先移除模版上的所有算法实例
 	list = &tmpl->instances;
 	hlist_for_each_entry(inst, list, list) {
 		int err = crypto_remove_alg(&inst->alg, &users);
@@ -492,6 +498,7 @@ void crypto_unregister_template(struct crypto_template *tmpl)
 
 	up_write(&crypto_alg_sem);
 
+	//释放模版的所有算法实例分配的内存
 	hlist_for_each_entry_safe(inst, n, list, list) {
 		BUG_ON(atomic_read(&inst->alg.cra_refcnt) != 1);
 		tmpl->free(inst);
@@ -505,9 +512,11 @@ static struct crypto_template *__crypto_lookup_template(const char *name)
 	struct crypto_template *q, *tmpl = NULL;
 
 	down_read(&crypto_alg_sem);
+	 //遍历crypto_template_list链，匹备模版名称
 	list_for_each_entry(q, &crypto_template_list, list) {
 		if (strcmp(q->name, name))
 			continue;
+		//查找命中，需要对其增加引用，以防止其正在使用时，模块被卸载。完成该操作后返回查找到的模版
 		if (unlikely(!crypto_tmpl_get(q)))
 			continue;
 
@@ -519,6 +528,7 @@ static struct crypto_template *__crypto_lookup_template(const char *name)
 	return tmpl;
 }
 
+// 算法模版的查找
 struct crypto_template *crypto_lookup_template(const char *name)
 {
 	return try_then_request_module(__crypto_lookup_template(name),

@@ -21,6 +21,7 @@
 static int xfrm4_transport_output(struct xfrm_state *x, struct sk_buff *skb)
 {
 	struct iphdr *iph = ip_hdr(skb);
+	// ip头长度
 	int ihl = iph->ihl * 4;
 
 	skb_set_network_header(skb, -x->props.header_len);
@@ -28,6 +29,7 @@ static int xfrm4_transport_output(struct xfrm_state *x, struct sk_buff *skb)
 			  offsetof(struct iphdr, protocol);
 	skb->transport_header = skb->network_header + ihl;
 	__skb_pull(skb, ihl);
+	// 重新计算新的network_header位置,增加proposal中的头长度, 拷贝原来的IP头数据
 	memmove(skb_network_header(skb), iph, ihl);
 	return 0;
 }
@@ -40,15 +42,19 @@ static int xfrm4_transport_output(struct xfrm_state *x, struct sk_buff *skb)
  * shall be set to where the IP header currently is.  skb->data shall point
  * to the start of the payload.
  */
+ // 传输模式下的数据输入函数
 static int xfrm4_transport_input(struct xfrm_state *x, struct sk_buff *skb)
 {
+	// data指向负载头, h指向IP头, 但很多情况下两者相同
 	int ihl = skb->data - skb_transport_header(skb);
 
+	// 如果transport_header和network_header不同, 将network_header所指向IP头部分移动到transport_header处
 	if (skb->transport_header != skb->network_header) {
 		memmove(skb_transport_header(skb),
 			skb_network_header(skb), ihl);
 		skb->network_header = skb->transport_header;
 	}
+	// 增加数据包长度, 重新对数据包长度赋值
 	ip_hdr(skb)->tot_len = htons(skb->len + ihl);
 	skb_reset_transport_header(skb);
 	return 0;

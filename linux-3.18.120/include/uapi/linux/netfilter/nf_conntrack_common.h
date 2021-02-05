@@ -32,27 +32,29 @@ enum ip_conntrack_info {
 /* Bitset representing status of connection. */
 enum ip_conntrack_status {
 	/* It's an expected connection: bit 0 set.  This bit never changed */
-	IPS_EXPECTED_BIT = 0,
+	IPS_EXPECTED_BIT = 0,  /* 表示该连接是个子连接 */
 	IPS_EXPECTED = (1 << IPS_EXPECTED_BIT),
 
 	/* We've seen packets both ways: bit 1 set.  Can be set, not unset. */
-	IPS_SEEN_REPLY_BIT = 1,
+	IPS_SEEN_REPLY_BIT = 1, /* 表示该连接上双方向上都有数据包了 */
 	IPS_SEEN_REPLY = (1 << IPS_SEEN_REPLY_BIT),
 
 	/* Conntrack should never be early-expired. */
-	IPS_ASSURED_BIT = 2,
+	IPS_ASSURED_BIT = 2,  /* TCP：在三次握手建立完连接后即设定该标志。
+	                         UDP：如果在该连接上的两个方向都有数据包通过，则再有数据包在该连接上通过时，就设定该标志。
+							 ICMP：不设置该标志 */
 	IPS_ASSURED = (1 << IPS_ASSURED_BIT),
 
 	/* Connection is confirmed: originating packet has left box */
-	IPS_CONFIRMED_BIT = 3,
+	IPS_CONFIRMED_BIT = 3,  /* 表示该连接已被添加到net->ct.hash表中 */
 	IPS_CONFIRMED = (1 << IPS_CONFIRMED_BIT),
 
 	/* Connection needs src nat in orig dir.  This bit never changed. */
-	IPS_SRC_NAT_BIT = 4,
+	IPS_SRC_NAT_BIT = 4,   /*在POSTROUTING处，当替换reply tuple完成时, 设置该标记 */
 	IPS_SRC_NAT = (1 << IPS_SRC_NAT_BIT),
 
 	/* Connection needs dst nat in orig dir.  This bit never changed. */
-	IPS_DST_NAT_BIT = 5,
+	IPS_DST_NAT_BIT = 5,  /* 在PREROUTING处，当替换reply tuple完成时, 设置该标记 */
 	IPS_DST_NAT = (1 << IPS_DST_NAT_BIT),
 
 	/* Both together. */
@@ -63,25 +65,25 @@ enum ip_conntrack_status {
 	IPS_SEQ_ADJUST = (1 << IPS_SEQ_ADJUST_BIT),
 
 	/* NAT initialization bits. */
-	IPS_SRC_NAT_DONE_BIT = 7,
+	IPS_SRC_NAT_DONE_BIT = 7,  /* 在POSTROUTING处，已被SNAT处理，并被加入到bysource链中，设置该标记 */
 	IPS_SRC_NAT_DONE = (1 << IPS_SRC_NAT_DONE_BIT),
 
-	IPS_DST_NAT_DONE_BIT = 8,
+	IPS_DST_NAT_DONE_BIT = 8, /* 在PREROUTING处，已被DNAT处理，并被加入到bysource链中，设置该标记 */
 	IPS_DST_NAT_DONE = (1 << IPS_DST_NAT_DONE_BIT),
 
 	/* Both together */
 	IPS_NAT_DONE_MASK = (IPS_DST_NAT_DONE | IPS_SRC_NAT_DONE),
 
 	/* Connection is dying (removed from lists), can not be unset. */
-	IPS_DYING_BIT = 9,
+	IPS_DYING_BIT = 9,  /* 表示该连接正在被释放，内核通过该标志保证正在被释放的ct不会被其它地方再次引用。有了这个标志，当某个连接要被删除时，即使它还在net->ct.hash中，也不会再次被引用。*/
 	IPS_DYING = (1 << IPS_DYING_BIT),
 
 	/* Connection has fixed timeout. */
-	IPS_FIXED_TIMEOUT_BIT = 10,
+	IPS_FIXED_TIMEOUT_BIT = 10, /* 固定连接超时时间，这将不根据状态修改连接超时时间。通过函数nf_ct_refresh_acct()修改超时时间时检查该标志。 */
 	IPS_FIXED_TIMEOUT = (1 << IPS_FIXED_TIMEOUT_BIT),
 
 	/* Conntrack is a template */
-	IPS_TEMPLATE_BIT = 11,
+	IPS_TEMPLATE_BIT = 11,  /* 由CT target进行设置（这个target只能用在raw表中，用于为数据包构建指定ct，并打上该标志），用于表明这个ct是由CT target创建的 */
 	IPS_TEMPLATE = (1 << IPS_TEMPLATE_BIT),
 
 	/* Conntrack is a fake untracked entry */

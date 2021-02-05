@@ -103,8 +103,8 @@ struct socket_wq {
  *  @wq: wait queue for several uses
  */
 struct socket {
-	socket_state		state;
-
+	socket_state		state; // state用于表示socket所处的状态，是一个枚举变量
+							   // 该成员只对TCP socket有用，因为只有tcp是面向连接的协议，udp跟raw不需要维护socket状态
 	kmemcheck_bitfield_begin(type);
 	short			type;
 	kmemcheck_bitfield_end(type);
@@ -114,8 +114,8 @@ struct socket {
 	struct socket_wq __rcu	*wq;
 
 	struct file		*file;
-	struct sock		*sk;
-	const struct proto_ops	*ops;
+	struct sock		*sk; //sk指向与该套接口相关的传输控制块，传输层使用传输控制块存放套接口需要的信息。比如各种协议相关函数的指针。TCP、UDP、RAW
+	const struct proto_ops	*ops; // ops指向特定的传输协议的操作集接口，不同协议族不同。
 };
 
 struct vm_area_struct;
@@ -125,6 +125,12 @@ struct sockaddr;
 struct msghdr;
 struct module;
 
+/*proto_ops结构中定义的接口函数是从套接口系统调用到传输层调用的入口，
+	因此其成员与socket系统调用基本上是一一对应的。
+	整个proto_ops结构就是一张套接口系统调用的跳转表，
+	其中的某些操作会继续调用proto结构跳转表中的函数，
+	从而进入具体的传输层或网络层的处理。
+*/
 struct proto_ops {
 	int		family;
 	struct module	*owner;

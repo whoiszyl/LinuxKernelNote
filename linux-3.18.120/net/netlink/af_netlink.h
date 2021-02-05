@@ -24,13 +24,13 @@ struct netlink_ring {
 struct netlink_sock {
 	/* struct sock has to be the first member of netlink_sock */
 	struct sock		sk;
-	u32			portid;
-	u32			dst_portid;
+	u32			portid;  //表示本套接字自己绑定的id号，对于内核来说它就是0
+	u32			dst_portid;//表示为目的ID号
 	u32			dst_group;
 	u32			flags;
 	u32			subscriptions;
-	u32			ngroups;
-	unsigned long		*groups;
+	u32			ngroups;//表示协议支持多播组数量
+	unsigned long		*groups;//保存组位掩码
 	unsigned long		state;
 	size_t			max_recvmsg_len;
 	wait_queue_head_t	wait;
@@ -39,7 +39,8 @@ struct netlink_sock {
 	struct netlink_callback	cb;
 	struct mutex		*cb_mutex;
 	struct mutex		cb_def_mutex;
-	void			(*netlink_rcv)(struct sk_buff *skb);
+	void			(*netlink_rcv)(struct sk_buff *skb);//保存接收到用户态数据后的处理函数
+	//协议子协议自身特有的绑定和解绑定处理函数
 	int			(*netlink_bind)(int group);
 	void			(*netlink_unbind)(int group);
 	struct module		*module;
@@ -53,13 +54,14 @@ static inline struct netlink_sock *nlk_sk(struct sock *sk)
 }
 
 struct netlink_table {
-	struct rhashtable	hash;
-	struct hlist_head	mc_list;
-	struct listeners __rcu	*listeners;
+	struct rhashtable	hash;   //用来索引同种协议类型的不同netlink套接字实例
+	struct hlist_head	mc_list;//多播使用的sock散列表
+	struct listeners __rcu	*listeners;//监听者掩码
 	unsigned int		flags;
-	unsigned int		groups;
+	unsigned int		groups;		//协议支持的最大多播组数量
 	struct mutex		*cb_mutex;
 	struct module		*module;
+	//函数指针会在内核首次创建netlink的时候被赋值，后续应用层创建和绑定套接字使用
 	int			(*bind)(int group);
 	void			(*unbind)(int group);
 	bool			(*compare)(struct net *net, struct sock *sock);

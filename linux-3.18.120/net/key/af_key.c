@@ -49,7 +49,10 @@ static const struct xfrm_mark dummy_mark = {0, 0};
 struct pfkey_sock {
 	/* struct sock must be the first member of struct pfkey_sock */
 	struct sock	sk;
+	// 比普通sock添加两个参数
+	// 是否进行登记
 	int		registered;
+	// 是否是混杂模式
 	int		promisc;
 
 	struct {
@@ -139,6 +142,7 @@ static struct proto key_proto = {
 	.obj_size = sizeof(struct pfkey_sock),
 };
 
+// 在用户空间每次打开pfkey socket时都会调用此函数:
 static int pfkey_create(struct net *net, struct socket *sock, int protocol,
 			int kern)
 {
@@ -147,14 +151,17 @@ static int pfkey_create(struct net *net, struct socket *sock, int protocol,
 	struct pfkey_sock *pfk;
 	int err;
 
+	// 建立PFKEY的socket必须有ROOT权限
 	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
+	// socket类型必须是RAW, 协议为PF_KEY_V2
 	if (sock->type != SOCK_RAW)
 		return -ESOCKTNOSUPPORT;
 	if (protocol != PF_KEY_V2)
 		return -EPROTONOSUPPORT;
 
 	err = -ENOMEM;
+	// 分配sock结构, 并清零
 	sk = sk_alloc(net, PF_KEY, GFP_KERNEL, &key_proto);
 	if (sk == NULL)
 		goto out;
@@ -162,14 +169,18 @@ static int pfkey_create(struct net *net, struct socket *sock, int protocol,
 	pfk = pfkey_sk(sk);
 	mutex_init(&pfk->dump_lock);
 
+	// PFKEY类型socket的操作
 	sock->ops = &pfkey_ops;
+	// 初始化socket参数
 	sock_init_data(sock, sk);
-
+	
+	// 初始化sock的族类型和释放函数
 	sk->sk_family = PF_KEY;
 	sk->sk_destruct = pfkey_sock_destruct;
 
+	// 增加使用数
 	atomic_inc(&net_pfkey->socks_nr);
-
+	// 将sock挂接到系统的sock链表
 	pfkey_insert(sk);
 
 	return 0;
@@ -179,23 +190,29 @@ out:
 
 static int pfkey_release(struct socket *sock)
 {
+	// 从socket到sock结构转换
 	struct sock *sk = sock->sk;
 
 	if (!sk)
 		return 0;
 
+	// 将sock从系统的sock链表断开
 	pfkey_remove(sk);
 
+	// 设置sock状态为DEAD, 清空sock中的socket和sleep指针
 	sock_orphan(sk);
 	sock->sk = NULL;
+	// 清除当前数据队列
 	skb_queue_purge(&sk->sk_write_queue);
 
 	synchronize_rcu();
+	// 释放sock
 	sock_put(sk);
 
 	return 0;
 }
 
+// 发送一个包
 static int pfkey_broadcast_one(struct sk_buff *skb, struct sk_buff **skb2,
 			       gfp_t allocation, struct sock *sk)
 {
@@ -203,14 +220,17 @@ static int pfkey_broadcast_one(struct sk_buff *skb, struct sk_buff **skb2,
 
 	sock_hold(sk);
 	if (*skb2 == NULL) {
+		// skb2是skb的一个克隆包
 		if (atomic_read(&skb->users) != 1) {
 			*skb2 = skb_clone(skb, allocation);
 		} else {
 			*skb2 = skb;
+			// 因为发送会减少skb的使用计数
 			atomic_inc(&skb->users);
 		}
 	}
 	if (*skb2 != NULL) {
+		// 实际发送的时skb2
 		if (atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf) {
 			skb_set_owner_r(*skb2, sk);
 			skb_queue_tail(&sk->sk_receive_queue, *skb2);
@@ -223,6 +243,10 @@ static int pfkey_broadcast_one(struct sk_buff *skb, struct sk_buff **skb2,
 	return err;
 }
 
+/*	pfkey广播是将内核到用户空间的回应信息, 
+	所有打开了PF_KEY类型socket的用户空间程序都可以收到,
+	所以用户空间程序在收到消息的时候要判断是否该消息是给自己的,
+	不是就忽略掉，这和netlink的广播比较类似。*/
 /* Send SKB to all pfkey sockets matching selected criteria.  */
 #define BROADCAST_ALL		0
 #define BROADCAST_ONE		1
@@ -244,7 +268,9 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 		return -ENOMEM;
 
 	rcu_read_lock();
+	// 遍历所有的pfkey sock表,
 	sk_for_each_rcu(sk, &net_pfkey->table) {
+	// 获取pfkey sock用于发送消息
 		struct pfkey_sock *pfk = pfkey_sk(sk);
 		int err2;
 
@@ -252,21 +278,30 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 		 * pfkey message you receive it twice as promiscuous
 		 * socket.
 		 */
+		 // 该pfkey sock是混杂模式, 先发送一次, 由于后面还会广播发送, 所以设置了混杂模式的pfkey
+		 // sock一般情况下会收到两次
 		if (pfk->promisc)
 			pfkey_broadcast_one(skb, &skb2, allocation, sk);
 
 		/* the exact target will be processed later */
+		// 指定了one_sk的话这个one_sk对应的用户程序将最后才收到包, 现在在循环中不发
+		// 以后才发
 		if (sk == one_sk)
 			continue;
+		// 如果不是广播给所有的进程, #define BROADCAST_ALL  0
 		if (broadcast_flags != BROADCAST_ALL) {
+			// 如果只广播给pfkey混杂模式的进程, 跳过, 继续循环
 			if (broadcast_flags & BROADCAST_PROMISC_ONLY)
 				continue;
+			// 如果只广播给登记的进程而该sock没登记, 跳过, 继续循环
 			if ((broadcast_flags & BROADCAST_REGISTERED) &&
 			    !pfk->registered)
 				continue;
+			// 只广播给一个, 和one_sk配合使用, 这样消息就只会发送给one_sk和所有混杂模式的pfkey sock
 			if (broadcast_flags & BROADCAST_ONE)
 				continue;
 		}
+		// 发送给该pfkey sock
 
 		err2 = pfkey_broadcast_one(skb, &skb2, allocation, sk);
 
@@ -276,10 +311,12 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 			err = err2;
 	}
 	rcu_read_unlock();
-
+	
+	// 如果指定one_sk, 再向该pfkey sock发送, 该sock是最后一个收到消息的
 	if (one_sk != NULL)
 		err = pfkey_broadcast_one(skb, &skb2, allocation, one_sk);
 
+	// 释放skb
 	kfree_skb(skb2);
 	kfree_skb(skb);
 	return err;
@@ -1797,9 +1834,14 @@ static int pfkey_flush(struct sock *sk, struct sk_buff *skb, const struct sadb_m
 		return err ? err : err2;
 	}
 
+	// 填写事件参数
+	// 协议
 	c.data.proto = proto;
+	// 序列号
 	c.seq = hdr->sadb_msg_seq;
+	// sock对方(用户空间进程)的pid
 	c.portid = hdr->sadb_msg_pid;
+	// 事件
 	c.event = XFRM_MSG_FLUSHSA;
 	c.net = net;
 	km_state_notify(NULL, &c);
@@ -2233,6 +2275,7 @@ static int key_notify_policy(struct xfrm_policy *xp, int dir, const struct km_ev
 	struct sadb_msg *out_hdr;
 	int err;
 
+	//准备工作，申请空间
 	out_skb = pfkey_xfrm_policy2msg_prep(xp);
 	if (IS_ERR(out_skb))
 		return PTR_ERR(out_skb);
@@ -2243,7 +2286,8 @@ static int key_notify_policy(struct xfrm_policy *xp, int dir, const struct km_ev
 
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = PF_KEY_V2;
-
+	
+	// SA消息类型为删除所有SP
 	if (c->data.byid && c->event == XFRM_MSG_DELPOLICY)
 		out_hdr->sadb_msg_type = SADB_X_SPDDELETE2;
 	else
@@ -2251,11 +2295,13 @@ static int key_notify_policy(struct xfrm_policy *xp, int dir, const struct km_ev
 	out_hdr->sadb_msg_errno = 0;
 	out_hdr->sadb_msg_seq = c->seq;
 	out_hdr->sadb_msg_pid = c->portid;
+	// 广播给所有打开PF_KEY类型套接口的用户进程
 	pfkey_broadcast(out_skb, GFP_ATOMIC, BROADCAST_ALL, NULL, xp_net(xp));
 	return 0;
 
 }
 
+// 添加安全策略到安全策略数据库SPDB
 static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, const struct sadb_msg *hdr, void * const *ext_hdrs)
 {
 	struct net *net = sock_net(sk);
@@ -2267,34 +2313,48 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, const struct sadb_
 	struct km_event c;
 	struct sadb_x_sec_ctx *sec_ctx;
 
+	// 错误检查, 源目的地址类型要一致, 策略信息非空
 	if (!present_and_same_family(ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 				     ext_hdrs[SADB_EXT_ADDRESS_DST-1]) ||
 	    !ext_hdrs[SADB_X_EXT_POLICY-1])
 		return -EINVAL;
 
+	// 策略指针
 	pol = ext_hdrs[SADB_X_EXT_POLICY-1];
+	// 策略类型只能是DISCARD, NONE和IPSEC三者之一
 	if (pol->sadb_x_policy_type > IPSEC_POLICY_IPSEC)
 		return -EINVAL;
+	// 必须明确该SP作用于哪个方向的的数据: IN, OUT和FORWARD, 最后那个不是RFC标准的
 	if (!pol->sadb_x_policy_dir || pol->sadb_x_policy_dir >= IPSEC_DIR_MAX)
 		return -EINVAL;
 
+	// 分配xfrm策略
 	xp = xfrm_policy_alloc(net, GFP_KERNEL);
 	if (xp == NULL)
 		return -ENOBUFS;
 
+	// 策略的动作: 阻塞还是放行
 	xp->action = (pol->sadb_x_policy_type == IPSEC_POLICY_DISCARD ?
 		      XFRM_POLICY_BLOCK : XFRM_POLICY_ALLOW);
+	// 策略的优先级
 	xp->priority = pol->sadb_x_policy_priority;
 
+	// 获取策略源地址及地址类型(v4 or v6)
 	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC-1];
 	xp->family = pfkey_sadb_addr2xfrm_addr(sa, &xp->selector.saddr);
+	// 填充策略选择子结构参数, 选择子中包括用来辨别策略的相关参数, 用来查找匹配策略
+	// 协议族
 	xp->selector.family = xp->family;
+	// 地址长度
 	xp->selector.prefixlen_s = sa->sadb_address_prefixlen;
+	// 协议
 	xp->selector.proto = pfkey_proto_to_xfrm(sa->sadb_address_proto);
+	// 策略中可以有上层协议的源端口参数, 不过不是必须的
 	xp->selector.sport = ((struct sockaddr_in *)(sa+1))->sin_port;
 	if (xp->selector.sport)
 		xp->selector.sport_mask = htons(0xffff);
-
+	// 获取策略目的地址及地址类型(v4 or v6)
+	// 和源地址处理类似
 	sa = ext_hdrs[SADB_EXT_ADDRESS_DST-1];
 	pfkey_sadb_addr2xfrm_addr(sa, &xp->selector.daddr);
 	xp->selector.prefixlen_d = sa->sadb_address_prefixlen;
@@ -2308,6 +2368,7 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, const struct sadb_
 	if (xp->selector.dport)
 		xp->selector.dport_mask = htons(0xffff);
 
+	// 用户定义的安全上下文
 	sec_ctx = ext_hdrs[SADB_X_EXT_SEC_CTX - 1];
 	if (sec_ctx != NULL) {
 		struct xfrm_user_sec_ctx *uctx = pfkey_sadb2xfrm_user_sec_ctx(sec_ctx, GFP_KERNEL);
@@ -2323,11 +2384,14 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, const struct sadb_
 		if (err)
 			goto out;
 	}
-
+	
+	// lft: xfrm_lifetime_config, 生存时间配置参数
+	// 关于字节数和包数的软硬限制初始化
 	xp->lft.soft_byte_limit = XFRM_INF;
 	xp->lft.hard_byte_limit = XFRM_INF;
 	xp->lft.soft_packet_limit = XFRM_INF;
 	xp->lft.hard_packet_limit = XFRM_INF;
+	// 如果在消息中定义了限制, 设置之
 	if ((lifetime = ext_hdrs[SADB_EXT_LIFETIME_HARD-1]) != NULL) {
 		xp->lft.hard_packet_limit = _KEY2X(lifetime->sadb_lifetime_allocations);
 		xp->lft.hard_byte_limit = _KEY2X(lifetime->sadb_lifetime_bytes);
@@ -2341,11 +2405,14 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, const struct sadb_
 		xp->lft.soft_use_expires_seconds = lifetime->sadb_lifetime_usetime;
 	}
 	xp->xfrm_nr = 0;
+	// 如果是IPSEC策略, 解析相关请求
 	if (pol->sadb_x_policy_type == IPSEC_POLICY_IPSEC &&
 	    (err = parse_ipsecrequests(xp, pol)) < 0)
 		goto out;
-
+	
+	// 将策略xp插入内核SPDB
 	err = xfrm_policy_insert(pol->sadb_x_policy_dir-1, xp,
+				// 一般是添加, 也可以是更新
 				 hdr->sadb_msg_type != SADB_X_SPDUPDATE);
 
 	xfrm_audit_policy_add(xp, err ? 0 : 1, true);
@@ -2361,6 +2428,7 @@ static int pfkey_spdadd(struct sock *sk, struct sk_buff *skb, const struct sadb_
 	c.seq = hdr->sadb_msg_seq;
 	c.portid = hdr->sadb_msg_pid;
 
+	// 策略通知回调处理
 	km_policy_notify(xp, pol->sadb_x_policy_dir-1, &c);
 	xfrm_pol_put(xp);
 	return 0;
@@ -2371,6 +2439,7 @@ out:
 	return err;
 }
 
+//删除SPD
 static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, const struct sadb_msg *hdr, void * const *ext_hdrs)
 {
 	struct net *net = sock_net(sk);
@@ -2383,17 +2452,21 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, const struct sa
 	struct sadb_x_sec_ctx *sec_ctx;
 	struct xfrm_sec_ctx *pol_ctx = NULL;
 
+	// 错误检查, 源目的地址类型要一致, 策略信息非空
 	if (!present_and_same_family(ext_hdrs[SADB_EXT_ADDRESS_SRC-1],
 				     ext_hdrs[SADB_EXT_ADDRESS_DST-1]) ||
 	    !ext_hdrs[SADB_X_EXT_POLICY-1])
 		return -EINVAL;
 
+	// 消息中定义的策略
 	pol = ext_hdrs[SADB_X_EXT_POLICY-1];
+	// 策略类型合法性检查
 	if (!pol->sadb_x_policy_dir || pol->sadb_x_policy_dir >= IPSEC_DIR_MAX)
 		return -EINVAL;
 
 	memset(&sel, 0, sizeof(sel));
 
+	// 解析消息中的源地址参数填充到选择子结构中
 	sa = ext_hdrs[SADB_EXT_ADDRESS_SRC-1];
 	sel.family = pfkey_sadb_addr2xfrm_addr(sa, &sel.saddr);
 	sel.prefixlen_s = sa->sadb_address_prefixlen;
@@ -2402,6 +2475,7 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, const struct sa
 	if (sel.sport)
 		sel.sport_mask = htons(0xffff);
 
+	// 解析消息中的目的地址参数填充到选择子结构中
 	sa = ext_hdrs[SADB_EXT_ADDRESS_DST-1];
 	pfkey_sadb_addr2xfrm_addr(sa, &sel.daddr);
 	sel.prefixlen_d = sa->sadb_address_prefixlen;
@@ -2411,6 +2485,7 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, const struct sa
 		sel.dport_mask = htons(0xffff);
 
 	sec_ctx = ext_hdrs[SADB_X_EXT_SEC_CTX - 1];
+	// 扩展的用户安全上下文信息处理
 	if (sec_ctx != NULL) {
 		struct xfrm_user_sec_ctx *uctx = pfkey_sadb2xfrm_user_sec_ctx(sec_ctx, GFP_KERNEL);
 
@@ -2423,10 +2498,13 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, const struct sa
 			return err;
 	}
 
+	// 根据策略类型, 处理的数据方向, 选择子参数等信息查找策略
+	// 同时最后一个参数为1表示找到后将策略从系统的SPDB链表中断开后删除
 	xp = xfrm_policy_bysel_ctx(net, DUMMY_MARK, XFRM_POLICY_TYPE_MAIN,
 				   pol->sadb_x_policy_dir - 1, &sel, pol_ctx,
 				   1, &err);
 	security_xfrm_policy_free(pol_ctx);
+	// 没有该策略, 出错
 	if (xp == NULL)
 		return -ENOENT;
 
@@ -2439,9 +2517,11 @@ static int pfkey_spddelete(struct sock *sk, struct sk_buff *skb, const struct sa
 	c.portid = hdr->sadb_msg_pid;
 	c.data.byid = 0;
 	c.event = XFRM_MSG_DELPOLICY;
+	// 反方向的策略通知回调处理
 	km_policy_notify(xp, pol->sadb_x_policy_dir-1, &c);
 
 out:
+	// 释放策略
 	xfrm_pol_put(xp);
 	if (err == 0)
 		xfrm_garbage_collect(net);
@@ -2656,7 +2736,7 @@ static int pfkey_migrate(struct sock *sk, struct sk_buff *skb,
 }
 #endif
 
-
+//
 static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, const struct sadb_msg *hdr, void * const *ext_hdrs)
 {
 	struct net *net = sock_net(sk);
@@ -2666,14 +2746,17 @@ static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, const struct sadb_
 	struct xfrm_policy *xp;
 	struct km_event c;
 
+	// 消息中的策略头
 	if ((pol = ext_hdrs[SADB_X_EXT_POLICY-1]) == NULL)
 		return -EINVAL;
 
+	// 根据策略id判断数据方向
 	dir = xfrm_policy_id2dir(pol->sadb_x_policy_id);
 	if (dir >= XFRM_POLICY_MAX)
 		return -EINVAL;
 
 	delete = (hdr->sadb_msg_type == SADB_X_SPDDELETE2);
+	// 根据方向/ID等参数来查找策略, 如果最后一个参数为真的同时删除策略
 	xp = xfrm_policy_byid(net, DUMMY_MARK, XFRM_POLICY_TYPE_MAIN,
 			      dir, pol->sadb_x_policy_id, delete, &err);
 	if (xp == NULL)
@@ -2684,12 +2767,14 @@ static int pfkey_spdget(struct sock *sk, struct sk_buff *skb, const struct sadb_
 
 		if (err)
 			goto out;
+		// 如果要删除策略, 进行通知回调
 		c.seq = hdr->sadb_msg_seq;
 		c.portid = hdr->sadb_msg_pid;
 		c.data.byid = 1;
 		c.event = XFRM_MSG_DELPOLICY;
 		km_policy_notify(xp, dir, &c);
 	} else {
+		// 将结果填充一个skb返回给用户空间
 		err = key_pol_get_resp(sk, xp, hdr, dir);
 	}
 
@@ -2710,23 +2795,28 @@ static int dump_sp(struct xfrm_policy *xp, int dir, int count, void *ptr)
 	if (!pfkey_can_dump(&pfk->sk))
 		return -ENOBUFS;
 
+	// 将安全策略填充到skb前的准备操作
 	out_skb = pfkey_xfrm_policy2msg_prep(xp);
 	if (IS_ERR(out_skb))
 		return PTR_ERR(out_skb);
-
+	
+	// 将安全策略填充到skb
 	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
 	if (err < 0)
 		return err;
-
+	
+	// 填充基本SA消息头
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = pfk->dump.msg_version;
 	out_hdr->sadb_msg_type = SADB_X_SPDDUMP;
 	out_hdr->sadb_msg_satype = SADB_SATYPE_UNSPEC;
 	out_hdr->sadb_msg_errno = 0;
+	// SA消息的序号
 	out_hdr->sadb_msg_seq = count + 1;
 	out_hdr->sadb_msg_pid = pfk->dump.msg_portid;
 
 	if (pfk->dump.skb)
+		// 发送到指定的sock
 		pfkey_broadcast(pfk->dump.skb, GFP_ATOMIC, BROADCAST_ONE,
 				&pfk->sk, sock_net(&pfk->sk));
 	pfk->dump.skb = out_skb;
@@ -2747,6 +2837,7 @@ static void pfkey_dump_sp_done(struct pfkey_sock *pfk)
 	xfrm_policy_walk_done(&pfk->dump.u.policy, net);
 }
 
+//输出整个SPD
 static int pfkey_spddump(struct sock *sk, struct sk_buff *skb, const struct sadb_msg *hdr, void * const *ext_hdrs)
 {
 	struct pfkey_sock *pfk = pfkey_sk(sk);
@@ -2767,15 +2858,18 @@ static int pfkey_spddump(struct sock *sk, struct sk_buff *skb, const struct sadb
 	return pfkey_do_dump(pfk);
 }
 
+// 删除SP回调
 static int key_notify_policy_flush(const struct km_event *c)
 {
 	struct sk_buff *skb_out;
 	struct sadb_msg *hdr;
 
+	// 分配skb
 	skb_out = alloc_skb(sizeof(struct sadb_msg) + 16, GFP_ATOMIC);
 	if (!skb_out)
 		return -ENOBUFS;
 	hdr = (struct sadb_msg *) skb_put(skb_out, sizeof(struct sadb_msg));
+	// SA消息类型为删除所有SP
 	hdr->sadb_msg_type = SADB_X_SPDFLUSH;
 	hdr->sadb_msg_seq = c->seq;
 	hdr->sadb_msg_pid = c->portid;
@@ -2784,17 +2878,20 @@ static int key_notify_policy_flush(const struct km_event *c)
 	hdr->sadb_msg_satype = SADB_SATYPE_UNSPEC;
 	hdr->sadb_msg_len = (sizeof(struct sadb_msg) / sizeof(uint64_t));
 	hdr->sadb_msg_reserved = 0;
+	// 广播给所有打开PF_KEY类型套接口的用户进程
 	pfkey_broadcast(skb_out, GFP_ATOMIC, BROADCAST_ALL, NULL, c->net);
 	return 0;
 
 }
 
+// 删除全部SP
 static int pfkey_spdflush(struct sock *sk, struct sk_buff *skb, const struct sadb_msg *hdr, void * const *ext_hdrs)
 {
 	struct net *net = sock_net(sk);
 	struct km_event c;
 	int err, err2;
 
+	// 删除全部MAIN类型的SP
 	err = xfrm_policy_flush(net, XFRM_POLICY_TYPE_MAIN, true);
 	err2 = unicast_flush_resp(sk, hdr);
 	if (err || err2) {
@@ -2846,13 +2943,16 @@ static int pfkey_process(struct sock *sk, struct sk_buff *skb, const struct sadb
 	void *ext_hdrs[SADB_EXT_MAX];
 	int err;
 
+	// 向混杂模式的sock发送SA消息
 	pfkey_broadcast(skb_clone(skb, GFP_KERNEL), GFP_KERNEL,
 			BROADCAST_PROMISC_ONLY, NULL, sock_net(sk));
 
 	memset(ext_hdrs, 0, sizeof(ext_hdrs));
+	// 解析SADB数据头中的消息类型
 	err = parse_exthdrs(skb, hdr, ext_hdrs);
 	if (!err) {
 		err = -EOPNOTSUPP;
+		// 根据消息类型调用相关的处理函数进行处理
 		if (pfkey_funcs[hdr->sadb_msg_type])
 			err = pfkey_funcs[hdr->sadb_msg_type](sk, skb, hdr, ext_hdrs);
 	}
@@ -3072,6 +3172,7 @@ static int key_notify_sa_expire(struct xfrm_state *x, const struct km_event *c)
 	return 0;
 }
 
+// 状态通知回调, 在SA操作后调用
 static int pfkey_send_notify(struct xfrm_state *x, const struct km_event *c)
 {
 	struct net *net = x ? xs_net(x) : c->net;
@@ -3079,15 +3180,19 @@ static int pfkey_send_notify(struct xfrm_state *x, const struct km_event *c)
 
 	if (atomic_read(&net_pfkey->socks_nr) == 0)
 		return 0;
-
+	// 根据事件类型来发送相关通知
 	switch (c->event) {
 	case XFRM_MSG_EXPIRE:
+		// SA到期的通知, SA消息类型为SADB_EXPIRE,只是进行了登记的PF_KEY socket可以收到
 		return key_notify_sa_expire(x, c);
 	case XFRM_MSG_DELSA:
 	case XFRM_MSG_NEWSA:
 	case XFRM_MSG_UPDSA:
+		// SA的通知, SA消息类型为分别为SADB_DELETE, SADB_ADD和SADB_UPDATE,
+		// 所有PF_KEY socket都可以收到
 		return key_notify_sa(x, c);
 	case XFRM_MSG_FLUSHSA:
+		// 删除全部SA的通知, SA消息类型为分别为SADB_FLUSH, 所有PF_KEY socket都可以收到
 		return key_notify_sa_flush(c);
 	case XFRM_MSG_NEWAE: /* not yet supported */
 		break;
@@ -3099,6 +3204,7 @@ static int pfkey_send_notify(struct xfrm_state *x, const struct km_event *c)
 	return 0;
 }
 
+// 策略通知回调, 在安全策略操作后调用
 static int pfkey_send_policy_notify(struct xfrm_policy *xp, int dir, const struct km_event *c)
 {
 	if (xp && xp->type != XFRM_POLICY_TYPE_MAIN)
@@ -3106,14 +3212,18 @@ static int pfkey_send_policy_notify(struct xfrm_policy *xp, int dir, const struc
 
 	switch (c->event) {
 	case XFRM_MSG_POLEXPIRE:
+		// 策略到期通知, 空函数
 		return key_notify_policy_expire(xp, c);
 	case XFRM_MSG_DELPOLICY:
 	case XFRM_MSG_NEWPOLICY:
 	case XFRM_MSG_UPDPOLICY:
+		// 策略的通知, SA消息类型为分别为SADB_X_SPDDELETE, SADB_X_SPDADD, SADB_X_SPDUPDATE等,
+		// 所有PF_KEY socket都可以收到
 		return key_notify_policy(xp, dir, c);
 	case XFRM_MSG_FLUSHPOLICY:
 		if (c->data.type != XFRM_POLICY_TYPE_MAIN)
 			break;
+		// 策略的通知, SA消息类型为分别为SADB_X_FLUSH, 所有PF_KEY socket都可以收到
 		return key_notify_policy_flush(c);
 	default:
 		pr_err("pfkey: Unknown policy event %d\n", c->event);
@@ -3168,6 +3278,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	if (!sockaddr_size)
 		return -EINVAL;
 
+	// 消息长度包括SA基本头, 两个SA地址, 两个网络地址和策略
 	size = sizeof(struct sadb_msg) +
 		(sizeof(struct sadb_address) * 2) +
 		(sockaddr_size * 2) +
@@ -3175,6 +3286,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 
 	if (x->id.proto == IPPROTO_AH)
 		size += count_ah_combs(t);
+	// 还添加AH或ESP中所有算法描述的长度
 	else if (x->id.proto == IPPROTO_ESP)
 		size += count_esp_combs(t);
 
@@ -3183,10 +3295,12 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 		size +=  sizeof(struct sadb_x_sec_ctx) + ctx_size;
 	}
 
+	// 分配skb
 	skb =  alloc_skb(size + 16, GFP_ATOMIC);
 	if (skb == NULL)
 		return -ENOMEM;
 
+	// 先填基本SA消息头信息 
 	hdr = (struct sadb_msg *) skb_put(skb, sizeof(struct sadb_msg));
 	hdr->sadb_msg_version = PF_KEY_V2;
 	hdr->sadb_msg_type = SADB_ACQUIRE;
@@ -3198,6 +3312,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	hdr->sadb_msg_pid = 0;
 
 	/* src address */
+	// 填充SA源地址信息
 	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
 	addr->sadb_address_len =
@@ -3214,6 +3329,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 		BUG();
 
 	/* dst address */
+	
 	addr = (struct sadb_address*) skb_put(skb,
 					      sizeof(struct sadb_address)+sockaddr_size);
 	addr->sadb_address_len =
@@ -3228,7 +3344,8 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 				    x->props.family);
 	if (!addr->sadb_address_prefixlen)
 		BUG();
-
+	
+	// 填充策略信息
 	pol = (struct sadb_x_policy *)  skb_put(skb, sizeof(struct sadb_x_policy));
 	pol->sadb_x_policy_len = sizeof(struct sadb_x_policy)/sizeof(uint64_t);
 	pol->sadb_x_policy_exttype = SADB_X_EXT_POLICY;
@@ -3239,6 +3356,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 	pol->sadb_x_policy_priority = xp->priority;
 
 	/* Set sadb_comb's. */
+	// 填充AH或ESP的可用算法信息
 	if (x->id.proto == IPPROTO_AH)
 		dump_ah_combs(skb, t);
 	else if (x->id.proto == IPPROTO_ESP)
@@ -3246,6 +3364,7 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 
 	/* security context */
 	if (xfrm_ctx) {
+		// 填充安全上下文信息
 		sec_ctx = (struct sadb_x_sec_ctx *) skb_put(skb,
 				sizeof(struct sadb_x_sec_ctx) + ctx_size);
 		sec_ctx->sadb_x_sec_len =
@@ -3257,10 +3376,12 @@ static int pfkey_send_acquire(struct xfrm_state *x, struct xfrm_tmpl *t, struct 
 		memcpy(sec_ctx + 1, xfrm_ctx->ctx_str,
 		       xfrm_ctx->ctx_len);
 	}
-
+	
+	// 广播到进行了登记的PF_KEY套接口
 	return pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_REGISTERED, NULL, xs_net(x));
 }
 
+// 将sadb_x_policy(标准接口格式)编译为xfrm_policy(内核具体实现格式)
 static struct xfrm_policy *pfkey_compile_policy(struct sock *sk, int opt,
 						u8 *data, int len, int *dir)
 {
@@ -3269,6 +3390,7 @@ static struct xfrm_policy *pfkey_compile_policy(struct sock *sk, int opt,
 	struct sadb_x_policy *pol = (struct sadb_x_policy*)data;
 	struct sadb_x_sec_ctx *sec_ctx;
 
+	// 选项opt必须是IP_IPSEC_POLICY, 否则出错
 	switch (sk->sk_family) {
 	case AF_INET:
 		if (opt != IP_IPSEC_POLICY) {
@@ -3297,15 +3419,16 @@ static struct xfrm_policy *pfkey_compile_policy(struct sock *sk, int opt,
 	    (!pol->sadb_x_policy_dir || pol->sadb_x_policy_dir > IPSEC_DIR_OUTBOUND))
 		return NULL;
 
+	// 分配策略空间
 	xp = xfrm_policy_alloc(net, GFP_ATOMIC);
 	if (xp == NULL) {
 		*dir = -ENOBUFS;
 		return NULL;
 	}
-
+	// 填写策略动作
 	xp->action = (pol->sadb_x_policy_type == IPSEC_POLICY_DISCARD ?
 		      XFRM_POLICY_BLOCK : XFRM_POLICY_ALLOW);
-
+	// 填写策略有效期参数
 	xp->lft.soft_byte_limit = XFRM_INF;
 	xp->lft.hard_byte_limit = XFRM_INF;
 	xp->lft.soft_packet_limit = XFRM_INF;
@@ -3313,6 +3436,7 @@ static struct xfrm_policy *pfkey_compile_policy(struct sock *sk, int opt,
 	xp->family = sk->sk_family;
 
 	xp->xfrm_nr = 0;
+	// 解析ipsec请求
 	if (pol->sadb_x_policy_type == IPSEC_POLICY_IPSEC &&
 	    (*dir = parse_ipsecrequests(xp, pol)) < 0)
 		goto out;
@@ -3320,6 +3444,7 @@ static struct xfrm_policy *pfkey_compile_policy(struct sock *sk, int opt,
 	/* security context too */
 	if (len >= (pol->sadb_x_policy_len*8 +
 	    sizeof(struct sadb_x_sec_ctx))) {
+	    // 转换安全上下文
 		char *p = (char *)pol;
 		struct xfrm_user_sec_ctx *uctx;
 
@@ -3349,6 +3474,7 @@ out:
 	return NULL;
 }
 
+// 发送新映射(NAT穿越)SA消息, 包含SA头, SA, 转换前地址,端口, 转换后的地址端口
 static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, __be16 sport)
 {
 	struct sk_buff *skb;
@@ -3361,6 +3487,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	__u8 satype = (x->id.proto == IPPROTO_ESP ? SADB_SATYPE_ESP : 0);
 	struct xfrm_encap_tmpl *natt = NULL;
 
+	// 协议的地址长度
 	sockaddr_size = pfkey_sockaddr_size(x->props.family);
 	if (!sockaddr_size)
 		return -EINVAL;
@@ -3371,6 +3498,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	if (!x->encap)
 		return -EINVAL;
 
+	// NAT转换结构
 	natt = x->encap;
 
 	/* Build an SADB_X_NAT_T_NEW_MAPPING message:
@@ -3378,17 +3506,19 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	 * HDR | SA | ADDRESS_SRC (old addr) | NAT_T_SPORT (old port) |
 	 * ADDRESS_DST (new addr) | NAT_T_DPORT (new port)
 	 */
-
+	// 消息总长: SA消息头+SA+两个SA地址+两个协议地址+2个NAT端口
 	size = sizeof(struct sadb_msg) +
 		sizeof(struct sadb_sa) +
 		(sizeof(struct sadb_address) * 2) +
 		(sockaddr_size * 2) +
 		(sizeof(struct sadb_x_nat_t_port) * 2);
 
+	// 分配skb 
 	skb =  alloc_skb(size + 16, GFP_ATOMIC);
 	if (skb == NULL)
 		return -ENOMEM;
 
+	// 填写SA头
 	hdr = (struct sadb_msg *) skb_put(skb, sizeof(struct sadb_msg));
 	hdr->sadb_msg_version = PF_KEY_V2;
 	hdr->sadb_msg_type = SADB_X_NAT_T_NEW_MAPPING;
@@ -3400,6 +3530,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	hdr->sadb_msg_pid = 0;
 
 	/* SA */
+	// 填写SA结构
 	sa = (struct sadb_sa *) skb_put(skb, sizeof(struct sadb_sa));
 	sa->sadb_sa_len = sizeof(struct sadb_sa)/sizeof(uint64_t);
 	sa->sadb_sa_exttype = SADB_EXT_SA;
@@ -3411,6 +3542,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 	sa->sadb_sa_flags = 0;
 
 	/* ADDRESS_SRC (old addr) */
+	// 转换前SA地址参数
 	addr = (struct sadb_address*)
 		skb_put(skb, sizeof(struct sadb_address)+sockaddr_size);
 	addr->sadb_address_len =
@@ -3427,6 +3559,7 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 		BUG();
 
 	/* NAT_T_SPORT (old port) */
+	// 填写转换前端口参数
 	n_port = (struct sadb_x_nat_t_port*) skb_put(skb, sizeof (*n_port));
 	n_port->sadb_x_nat_t_port_len = sizeof(*n_port)/sizeof(uint64_t);
 	n_port->sadb_x_nat_t_port_exttype = SADB_X_EXT_NAT_T_SPORT;
@@ -3450,12 +3583,14 @@ static int pfkey_send_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, 
 		BUG();
 
 	/* NAT_T_DPORT (new port) */
+	// 填写转换后地址属性参数
 	n_port = (struct sadb_x_nat_t_port*) skb_put(skb, sizeof (*n_port));
 	n_port->sadb_x_nat_t_port_len = sizeof(*n_port)/sizeof(uint64_t);
 	n_port->sadb_x_nat_t_port_exttype = SADB_X_EXT_NAT_T_DPORT;
 	n_port->sadb_x_nat_t_port_port = sport;
 	n_port->sadb_x_nat_t_port_reserved = 0;
-
+	
+	// 发送给进行登记了的PF_KEY套接口
 	return pfkey_broadcast(skb, GFP_ATOMIC, BROADCAST_REGISTERED, NULL, xs_net(x));
 }
 
@@ -3665,6 +3800,7 @@ static int pfkey_send_migrate(const struct xfrm_selector *sel, u8 dir, u8 type,
 }
 #endif
 
+//实际是将数据从内核空间发送给用户空间的程序:
 static int pfkey_sendmsg(struct kiocb *kiocb,
 			 struct socket *sock, struct msghdr *msg, size_t len)
 {
@@ -3674,28 +3810,34 @@ static int pfkey_sendmsg(struct kiocb *kiocb,
 	int err;
 	struct net *net = sock_net(sk);
 
+	// PF_KEY不支持MSG_OOB标志
 	err = -EOPNOTSUPP;
 	if (msg->msg_flags & MSG_OOB)
 		goto out;
-
+	
+	// 一次发送的数据长度不能太大
 	err = -EMSGSIZE;
 	if ((unsigned int)len > sk->sk_sndbuf - 32)
 		goto out;
-
+	
+	// 获取一个空闲的skbuff
 	err = -ENOBUFS;
 	skb = alloc_skb(len, GFP_KERNEL);
 	if (skb == NULL)
 		goto out;
 
 	err = -EFAULT;
+	// 从缓冲区中拷贝数据到skbuff中
 	if (memcpy_fromiovec(skb_put(skb,len), msg->msg_iov, len))
 		goto out;
-
+	
+	// 获取SADB数据头的指针
 	hdr = pfkey_get_base_msg(skb, &err);
 	if (!hdr)
 		goto out;
 
 	mutex_lock(&net->xfrm.xfrm_cfg_mutex);
+	// 处理PFKEY数据的发送
 	err = pfkey_process(sk, skb, hdr);
 	mutex_unlock(&net->xfrm.xfrm_cfg_mutex);
 
@@ -3707,6 +3849,7 @@ out:
 	return err ? : len;
 }
 
+//实际是将数据从用户空间发送给内核空间:
 static int pfkey_recvmsg(struct kiocb *kiocb,
 			 struct socket *sock, struct msghdr *msg, size_t len,
 			 int flags)
@@ -3717,24 +3860,29 @@ static int pfkey_recvmsg(struct kiocb *kiocb,
 	int copied, err;
 
 	err = -EINVAL;
+	// 只支持4类标志
 	if (flags & ~(MSG_PEEK|MSG_DONTWAIT|MSG_TRUNC|MSG_CMSG_COMPAT))
 		goto out;
 
+	// 接收数据包
 	skb = skb_recv_datagram(sk, flags, flags & MSG_DONTWAIT, &err);
 	if (skb == NULL)
 		goto out;
 
 	copied = skb->len;
+	// 接收到的数据超过了接收缓冲区长度, 设置截断标志
 	if (copied > len) {
 		msg->msg_flags |= MSG_TRUNC;
 		copied = len;
 	}
 
 	skb_reset_transport_header(skb);
+	// 将数据包中信息拷贝到接收缓冲区
 	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 	if (err)
 		goto out_free;
-
+	
+	// 设置时间戳
 	sock_recv_ts_and_drops(msg, sk, skb);
 
 	err = (flags & MSG_TRUNC) ? skb->len : copied;
@@ -3749,6 +3897,11 @@ out:
 	return err;
 }
 
+// 	PF_KEY套接口操作
+/*	PF_KEY类型的sock中大多数操作都没有定义, 
+	这是因为PF_KEY的数据都是本机内的内核空间与用户空间的交换,
+	因此实际和网络相关的操作都不用定义, 
+	所谓发送和接收数据也只是内核与用户空间之间的通信。*/
 static const struct proto_ops pfkey_ops = {
 	.family		=	PF_KEY,
 	.owner		=	THIS_MODULE,
@@ -3773,6 +3926,8 @@ static const struct proto_ops pfkey_ops = {
 	.recvmsg	=	pfkey_recvmsg,
 };
 
+// pfkey协议族操作, 在用户程序使用socket打开pfkey类型的socket时调用,
+// 相应的create函数在__sock_create(net/socket.c)函数中调用:
 static const struct net_proto_family pfkey_family_ops = {
 	.family	=	PF_KEY,
 	.create	=	pfkey_create,
@@ -3867,7 +4022,9 @@ static inline void pfkey_exit_proc(struct net *net)
 {
 }
 #endif
-
+/*	在pf_key的初始化函数中定义了通知回调结构pfkeyv2_mgr:
+	 err = xfrm_register_km(&pfkeyv2_mgr);
+	该结构定义如下:*/
 static struct xfrm_mgr pfkeyv2_mgr =
 {
 	.id		= "pfkeyv2",
@@ -3918,17 +4075,28 @@ static void __exit ipsec_pfkey_exit(void)
 
 static int __init ipsec_pfkey_init(void)
 {
+	// 登记key_proto结构, 该结构定义如下:
+	// static struct proto key_proto = {
+	// .name   = "KEY",
+	// .owner	= THIS_MODULE,
+	// .obj_size = sizeof(struct pfkey_sock),
+	//};
+	// 最后一个参数为0, 表示不进行slab的分配, 只是简单的将key_proto结构
+	// 挂接到系统的网络协议链表中,这个结构最主要是告知了pfkey sock结构的大小
+
 	int err = proto_register(&key_proto, 0);
 
 	if (err != 0)
 		goto out;
-
+	
+	// 登记pfkey协议族的的操作结构
 	err = register_pernet_subsys(&pfkey_net_ops);
 	if (err != 0)
 		goto out_unregister_key_proto;
 	err = sock_register(&pfkey_family_ops);
 	if (err != 0)
 		goto out_unregister_pernet;
+	// 登记通知(notify)处理pfkeyv2_mgr
 	err = xfrm_register_km(&pfkeyv2_mgr);
 	if (err != 0)
 		goto out_sock_unregister;

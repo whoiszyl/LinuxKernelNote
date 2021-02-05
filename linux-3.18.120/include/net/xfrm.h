@@ -131,64 +131,64 @@ struct xfrm_state {
 #endif
 	union {
 		struct hlist_node	gclist;
-		struct hlist_node	bydst;
+		struct hlist_node	bydst;// 按目的地址HASH，与回收重用
 	};
-	struct hlist_node	bysrc;
-	struct hlist_node	byspi;
+	struct hlist_node	bysrc;// 按源地址HASH
+	struct hlist_node	byspi;// 按SPI值HASH
 
-	atomic_t		refcnt;
-	spinlock_t		lock;
-
-	struct xfrm_id		id;
-	struct xfrm_selector	sel;
+	atomic_t		refcnt;// 所有使用计数
+	spinlock_t		lock; // 状态锁
+	
+	struct xfrm_id		id; // ID结构， 即目的地址，SPI，协议三元组
+	struct xfrm_selector	sel;// 状态选择器
 	struct xfrm_mark	mark;
 	u32			tfcpad;
 
-	u32			genid;
+	u32			genid;// 状态的标志值, 防止发生碰撞
 
 	/* Key manager bits */
-	struct xfrm_state_walk	km;
+	struct xfrm_state_walk	km;// KEY回调管理处理结构参数
 
 	/* Parameters of this state. */
 	struct {
-		u32		reqid;
-		u8		mode;
-		u8		replay_window;
-		u8		aalgo, ealgo, calgo;
-		u8		flags;
-		u16		family;
-		xfrm_address_t	saddr;
-		int		header_len;
-		int		trailer_len;
+		u32		reqid;		           // 请求ID
+		u8		mode;		           // 模式: 传输/通道
+		u8		replay_window;		   // 回放窗口
+		u8		aalgo, ealgo, calgo;   // 认证,加密,压缩算法ID值
+		u8		flags;				   // 一些标志
+		u16		family;				   // 协议族
+		xfrm_address_t	saddr;		   // 源地址（出口地址）
+		int		header_len;			   // 添加的协议头长度，ESP/AH头（+IP头，隧道模式时）
+		int		trailer_len;		   //踪迹长度（添加的协议尾，只有ESP才有）
 		u32		extra_flags;
-	} props;
+	} props; // SA相关参数结构
 
-	struct xfrm_lifetime_cfg lft;
-
+	struct xfrm_lifetime_cfg lft;	   // 生存时间配置
+ 
 	/* Data for transformer */
-	struct xfrm_algo_auth	*aalg;
-	struct xfrm_algo	*ealg;
-	struct xfrm_algo	*calg;
+	struct xfrm_algo_auth	*aalg;	   // 认证算法
+	struct xfrm_algo	*ealg;		   // 加密算法
+	struct xfrm_algo	*calg;		   // 压缩算法
 	struct xfrm_algo_aead	*aead;
 
 	/* Data for encapsulator */
-	struct xfrm_encap_tmpl	*encap;
+	struct xfrm_encap_tmpl	*encap;    //封装模板
 
 	/* Data for care-of address */
-	xfrm_address_t	*coaddr;
+	xfrm_address_t	*coaddr;           //地址数据
 
 	/* IPComp needs an IPIP tunnel for handling uncompressed packets */
-	struct xfrm_state	*tunnel;
+	struct xfrm_state	*tunnel;       // 通道, 实际是另一个SA
 
 	/* If a tunnel, number of users + 1 */
-	atomic_t		tunnel_users;
+	atomic_t		tunnel_users;      // 通道的使用数
 
 	/* State for replay detection */
-	struct xfrm_replay_state replay;
+	struct xfrm_replay_state replay;   // 回放检测结构,包含各种序列号掩码等信息
 	struct xfrm_replay_state_esn *replay_esn;
 
 	/* Replay detection state at the time we sent the last notification */
-	struct xfrm_replay_state preplay;
+	struct xfrm_replay_state preplay;   // 上次的回放记录值
 	struct xfrm_replay_state_esn *preplay_esn;
 
 	/* The functions for replay detection. */
@@ -197,19 +197,19 @@ struct xfrm_state {
 	/* internal flag that only holds state for delayed aevent at the
 	 * moment
 	*/
-	u32			xflags;
+	u32			xflags;   // 标志
 
 	/* Replay detection notification settings */
-	u32			replay_maxage;
-	u32			replay_maxdiff;
+	u32			replay_maxage;     		// 回放最大时间间隔
+	u32			replay_maxdiff;    		// 回放最大差值
 
 	/* Replay detection notification timer */
-	struct timer_list	rtimer;
+	struct timer_list	rtimer;			// 回放检测定时器
 
 	/* Statistics */
-	struct xfrm_stats	stats;
+	struct xfrm_stats	stats;		    // 统计值
 
-	struct xfrm_lifetime_cur curlft;
+	struct xfrm_lifetime_cur curlft;    // 当前时间计数器
 	struct tasklet_hrtimer	mtimer;
 
 	/* used to fix curlft->add_time when changing date */
@@ -220,17 +220,17 @@ struct xfrm_state {
 
 	/* Reference to data common to all the instances of this
 	 * transformer. */
-	const struct xfrm_type	*type;
-	struct xfrm_mode	*inner_mode;
+	const struct xfrm_type	*type;       // 协议, ESP/AH/IPCOMP
+	struct xfrm_mode	*inner_mode;     // 进入或输出的模式, 通道或传输
 	struct xfrm_mode	*inner_mode_iaf;
 	struct xfrm_mode	*outer_mode;
 
 	/* Security context */
-	struct xfrm_sec_ctx	*security;
+	struct xfrm_sec_ctx	*security;      // 安全上下文, 加密时使用
 
 	/* Private data of this transformer, format is opaque,
 	 * interpreted by xfrm_type methods. */
-	void			*data;
+	void			*data;              // 内部数据（esp_init_state/ah_init_state中赋值）
 };
 
 static inline struct net *xs_net(struct xfrm_state *x)
@@ -252,6 +252,7 @@ enum {
 };
 
 /* callback structure passed from either netlink or pfkey */
+/*从NETLink或PFKEY传递的回调结构 */
 struct km_event {
 	union {
 		u32 hard;
@@ -283,25 +284,25 @@ struct net_device;
 struct xfrm_type;
 struct xfrm_dst;
 struct xfrm_policy_afinfo {
-	unsigned short		family;
-	struct dst_ops		*dst_ops;
-	void			(*garbage_collect)(struct net *net);
+	unsigned short		family;  // 协议族
+	struct dst_ops		*dst_ops;// 目的操作结构
+	void			(*garbage_collect)(struct net *net);//垃圾回收钩子函数
 	struct dst_entry	*(*dst_lookup)(struct net *net, int tos,
 					       const xfrm_address_t *saddr,
-					       const xfrm_address_t *daddr);
-	int			(*get_saddr)(struct net *net, xfrm_address_t *saddr, xfrm_address_t *daddr);
+					       const xfrm_address_t *daddr);//安全路由搜索
+	int			(*get_saddr)(struct net *net, xfrm_address_t *saddr, xfrm_address_t *daddr);//获取源地址
 	void			(*decode_session)(struct sk_buff *skb,
 						  struct flowi *fl,
-						  int reverse);
+						  int reverse); //解码会话
 	int			(*get_tos)(const struct flowi *fl);
 	void			(*init_dst)(struct net *net,
 					    struct xfrm_dst *dst);
 	int			(*init_path)(struct xfrm_dst *path,
 					     struct dst_entry *dst,
-					     int nfheader_len);
+					     int nfheader_len);//初始化安全路径
 	int			(*fill_dst)(struct xfrm_dst *xdst,
 					    struct net_device *dev,
-					    const struct flowi *fl);
+					    const struct flowi *fl);//填充安全路由
 	struct dst_entry	*(*blackhole_route)(struct net *net, struct dst_entry *orig);
 };
 
@@ -317,22 +318,23 @@ int km_query(struct xfrm_state *x, struct xfrm_tmpl *t,
 void km_state_expired(struct xfrm_state *x, int hard, u32 portid);
 int __xfrm_state_delete(struct xfrm_state *x);
 
+//状态的相关协议处理结构
 struct xfrm_state_afinfo {
-	unsigned int		family;
+	unsigned int		family;	// 协议族
 	unsigned int		proto;
 	__be16			eth_proto;
 	struct module		*owner;
 	const struct xfrm_type	*type_map[IPPROTO_MAX];
 	struct xfrm_mode	*mode_map[XFRM_MODE_MAX];
-	int			(*init_flags)(struct xfrm_state *x);
+	int			(*init_flags)(struct xfrm_state *x); // 初始化标志
 	void			(*init_tempsel)(struct xfrm_selector *sel,
 						const struct flowi *fl);
 	void			(*init_temprop)(struct xfrm_state *x,
 						const struct xfrm_tmpl *tmpl,
 						const xfrm_address_t *daddr,
-						const xfrm_address_t *saddr);
-	int			(*tmpl_sort)(struct xfrm_tmpl **dst, struct xfrm_tmpl **src, int n);
-	int			(*state_sort)(struct xfrm_state **dst, struct xfrm_state **src, int n);
+						const xfrm_address_t *saddr);// 初始化模板选择
+	int			(*tmpl_sort)(struct xfrm_tmpl **dst, struct xfrm_tmpl **src, int n);// 模板排序
+	int			(*state_sort)(struct xfrm_state **dst, struct xfrm_state **src, int n);// 状态排序
 	int			(*output)(struct sock *sk, struct sk_buff *skb);
 	int			(*output_finish)(struct sk_buff *skb);
 	int			(*extract_input)(struct xfrm_state *x,
@@ -361,30 +363,34 @@ int xfrm_input_unregister_afinfo(struct xfrm_input_afinfo *afinfo);
 
 void xfrm_state_delete_tunnel(struct xfrm_state *x);
 
+
+//对ESP, AH, IPCOMP等协议的描述是通过xfrm_type结构来描述的, 
+//多个协议的封装就是靠多个协议结构形成的链表来实现
 struct xfrm_type {
-	char			*description;
-	struct module		*owner;
-	u8			proto;
-	u8			flags;
+	char			*description; // 描述字符串 
+	struct module		*owner;  // 协议模块
+	u8			proto;			  // 协议值
+	u8			flags;           // 标志
 #define XFRM_TYPE_NON_FRAGMENT	1
 #define XFRM_TYPE_REPLAY_PROT	2
 #define XFRM_TYPE_LOCAL_COADDR	4
 #define XFRM_TYPE_REMOTE_COADDR	8
 
-	int			(*init_state)(struct xfrm_state *x);
-	void			(*destructor)(struct xfrm_state *);
-	int			(*input)(struct xfrm_state *, struct sk_buff *skb);
-	int			(*output)(struct xfrm_state *, struct sk_buff *pskb);
+	int			(*init_state)(struct xfrm_state *x);   // 初始化状态
+	void			(*destructor)(struct xfrm_state *); // 析构函数
+	int			(*input)(struct xfrm_state *, struct sk_buff *skb); // 数据输入函数
+	int			(*output)(struct xfrm_state *, struct sk_buff *pskb);// 数据输出函数
 	int			(*reject)(struct xfrm_state *, struct sk_buff *,
-					  const struct flowi *);
-	int			(*hdr_offset)(struct xfrm_state *, struct sk_buff *, u8 **);
+					  const struct flowi *);		// 拒绝函数
+	int			(*hdr_offset)(struct xfrm_state *, struct sk_buff *, u8 **);// 头部偏移
 	/* Estimate maximal size of result of transformation of a dgram */
-	u32			(*get_mtu)(struct xfrm_state *, int size);
+	u32			(*get_mtu)(struct xfrm_state *, int size);  // 最大数据报长度
 };
 
 int xfrm_register_type(const struct xfrm_type *type, unsigned short family);
 int xfrm_unregister_type(const struct xfrm_type *type, unsigned short family);
 
+//模式结构用于描述IPSEC连接描述, 可为通道模式或传输模式两种
 struct xfrm_mode {
 	/*
 	 * Remove encapsulation header.
@@ -407,7 +413,7 @@ struct xfrm_mode {
 	 * and equivalent would set this to the tunnel encapsulation function
 	 * xfrm4_prepare_input that would in turn call input2.
 	 */
-	int (*input)(struct xfrm_state *x, struct sk_buff *skb);
+	int (*input)(struct xfrm_state *x, struct sk_buff *skb); // 数据输入函数
 
 	/*
 	 * Add encapsulation header.
@@ -431,13 +437,13 @@ struct xfrm_mode {
 	 * (xfrm4_prepare_output or xfrm6_prepare_output) that would in turn
 	 * call output2.
 	 */
-	int (*output)(struct xfrm_state *x, struct sk_buff *skb);
+	int (*output)(struct xfrm_state *x, struct sk_buff *skb); // 数据输出函数
 
-	struct xfrm_state_afinfo *afinfo;
+	struct xfrm_state_afinfo *afinfo;//策略的相关协议处理结构
 	struct module *owner;
-	unsigned int encap;
-	int flags;
-};
+	unsigned int encap;   // 封装
+	int flags;            //标志
+}; 
 
 /* Flags for xfrm_mode. */
 enum {
@@ -468,6 +474,9 @@ static inline struct xfrm_mode *xfrm_ip2inner_mode(struct xfrm_state *x, int ipp
 		return x->inner_mode_iaf;
 }
 
+
+
+//用于状态和策略的查询
 struct xfrm_tmpl {
 /* id in template is interpreted as:
  * daddr - destination of tunnel, may be zero for transport mode.
@@ -475,31 +484,31 @@ struct xfrm_tmpl {
  *	   daddr must be fixed too.
  * proto - AH/ESP/IPCOMP
  */
-	struct xfrm_id		id;
+	struct xfrm_id		id; // SA三元组, 目的地址, 协议, SPI
 
 /* Source address of tunnel. Ignored, if it is not a tunnel. */
-	xfrm_address_t		saddr;
+	xfrm_address_t		saddr; // 源地址
 
 	unsigned short		encap_family;
 
-	u32			reqid;
+	u32			reqid; // 请求ID
 
 /* Mode: transport, tunnel etc. */
-	u8			mode;
+	u8			mode;//工作模式
 
 /* Sharing mode: unique, this session only, this user only etc. */
-	u8			share;
+	u8			share;//共享模式
 
 /* May skip this transfomration if no SA is found */
-	u8			optional;
+	u8			optional;//或选选项
 
 /* Skip aalgos/ealgos/calgos checks. */
-	u8			allalgs;
+	u8			allalgs;//认证、加密、压缩算法的检查
 
 /* Bit mask of algos allowed for acquisition */
-	u32			aalgos;
-	u32			ealgos;
-	u32			calgos;
+	u32			aalgos;//认证算法掩码位
+	u32			ealgos;//加密算法掩码位
+	u32			calgos;//压缩算法掩码位
 };
 
 #define XFRM_MAX_DEPTH		6
@@ -523,33 +532,33 @@ struct xfrm_policy_queue {
 
 struct xfrm_policy {
 #ifdef CONFIG_NET_NS
-	struct net		*xp_net;
+	struct net		*xp_net;    // 下一个策略
 #endif
-	struct hlist_node	bydst;
-	struct hlist_node	byidx;
+	struct hlist_node	bydst;  // 按目的地址HASH的链表
+	struct hlist_node	byidx;  // 按索引号HASH的链表
 
 	/* This lock only affects elements except for entry. */
-	rwlock_t		lock;
-	atomic_t		refcnt;
-	struct timer_list	timer;
+	rwlock_t		lock;     // 策略结构锁 
+	atomic_t		refcnt;   // 引用次数
+	struct timer_list	timer; // 策略定时器
 
-	struct flow_cache_object flo;
-	atomic_t		genid;
-	u32			priority;
-	u32			index;
-	struct xfrm_mark	mark;
-	struct xfrm_selector	selector;
-	struct xfrm_lifetime_cfg lft;
-	struct xfrm_lifetime_cur curlft;
-	struct xfrm_policy_walk_entry walk;
+	struct flow_cache_object flo;//流操作结构
+	atomic_t		genid;    //策略ID
+	u32			priority;     //策略优先级
+	u32			index;		  //策略索引号
+	struct xfrm_mark	mark; //策略标记
+	struct xfrm_selector	selector; // 选择器
+	struct xfrm_lifetime_cfg lft; // 策略生命期
+	struct xfrm_lifetime_cur curlft;  // 当前的生命期数据
+	struct xfrm_policy_walk_entry walk; //策略管理结构
 	struct xfrm_policy_queue polq;
-	u8			type;
-	u8			action;
-	u8			flags;
-	u8			xfrm_nr;
-	u16			family;
-	struct xfrm_sec_ctx	*security;
-	struct xfrm_tmpl       	xfrm_vec[XFRM_MAX_DEPTH];
+	u8			type;   //策略类型
+	u8			action; //策略动作
+	u8			flags;  //策略标志
+	u8			xfrm_nr;//策略的数量
+	u16			family;//策略对应的协议簇
+	struct xfrm_sec_ctx	*security; // 安全上下文
+	struct xfrm_tmpl       	xfrm_vec[XFRM_MAX_DEPTH]; // 状态模板
 };
 
 static inline struct net *xp_net(const struct xfrm_policy *xp)
@@ -592,17 +601,17 @@ struct xfrm_migrate {
 struct xfrm_mgr {
 	struct list_head	list;
 	char			*id;
-	int			(*notify)(struct xfrm_state *x, const struct km_event *c);
-	int			(*acquire)(struct xfrm_state *x, struct xfrm_tmpl *, struct xfrm_policy *xp);
-	struct xfrm_policy	*(*compile_policy)(struct sock *sk, int opt, u8 *data, int len, int *dir);
-	int			(*new_mapping)(struct xfrm_state *x, xfrm_address_t *ipaddr, __be16 sport);
-	int			(*notify_policy)(struct xfrm_policy *x, int dir, const struct km_event *c);
-	int			(*report)(struct net *net, u8 proto, struct xfrm_selector *sel, xfrm_address_t *addr);
+	int			(*notify)(struct xfrm_state *x, const struct km_event *c); // 状态通知
+	int			(*acquire)(struct xfrm_state *x, struct xfrm_tmpl *, struct xfrm_policy *xp);  // 获取, 如获取SA
+	struct xfrm_policy	*(*compile_policy)(struct sock *sk, int opt, u8 *data, int len, int *dir);// 编译策略
+	int			(*new_mapping)(struct xfrm_state *x, xfrm_address_t *ipaddr, __be16 sport);// 映射
+	int			(*notify_policy)(struct xfrm_policy *x, int dir, const struct km_event *c);// 策略通知
+	int			(*report)(struct net *net, u8 proto, struct xfrm_selector *sel, xfrm_address_t *addr);// 报告
 	int			(*migrate)(const struct xfrm_selector *sel,
 					   u8 dir, u8 type,
 					   const struct xfrm_migrate *m,
 					   int num_bundles,
-					   const struct xfrm_kmaddress *k);
+					   const struct xfrm_kmaddress *k);//迁移
 	bool			(*is_alive)(const struct km_event *c);
 };
 
@@ -961,12 +970,15 @@ struct xfrm_dst {
 static inline void xfrm_dst_destroy(struct xfrm_dst *xdst)
 {
 	xfrm_pols_put(xdst->pols, xdst->num_pols);
+	// 释放和安全路由相关的普通路由
 	dst_release(xdst->route);
+	// 释放SA
 	if (likely(xdst->u.dst.xfrm))
 		xfrm_state_put(xdst->u.dst.xfrm);
 }
 #endif
 
+// 网卡down时的回调操作
 void xfrm_dst_ifdown(struct dst_entry *dst, struct net_device *dev);
 
 struct sec_path {
@@ -1118,11 +1130,14 @@ static inline int xfrm_route_forward(struct sk_buff *skb, unsigned short family)
 {
 	struct net *net = dev_net(skb->dev);
 
+	// 如果没有发出方向的安全策略的话返回
 	return	!net->xfrm.policy_count[XFRM_POLICY_OUT] ||
+		// 如果路由标志专门设置不进行IPSEC封装的话也返回
 		(skb_dst(skb)->flags & DST_NOXFRM) ||
 		__xfrm_route_forward(skb, family);
 }
 
+//核心函数是xfrm_route_forward函数
 static inline int xfrm4_route_forward(struct sk_buff *skb)
 {
 	return xfrm_route_forward(skb, AF_INET);
@@ -1312,31 +1327,32 @@ struct xfrm_algo_aead_info {
 };
 
 struct xfrm_algo_auth_info {
-	u16 icv_truncbits;
-	u16 icv_fullbits;
-};
-
-struct xfrm_algo_encr_info {
-	u16 blockbits;
-	u16 defkeybits;
-};
-
-struct xfrm_algo_comp_info {
-	u16 threshold;
-};
-
-struct xfrm_algo_desc {
-	char *name;
-	char *compat;
+	u16 icv_truncbits; // 初始向量截断位数
+	 u16 icv_fullbits;	// 初始向量总的位数
+	};
+	// 加密算法参数
+	struct xfrm_algo_encr_info {
+	 u16 blockbits;  // 块位数
+	 u16 defkeybits; // 密钥长度位数
+	};
+	// 压缩算法参数
+	struct xfrm_algo_comp_info {
+	 u16 threshold;  // 阈值
+	};
+	// xfrm算法描述
+	struct xfrm_algo_desc {
+	 char *name;  // 名称
+	 char *compat; // 名称缩写
 	u8 available:1;
-	u8 pfkey_supported:1;
-	union {
+	 u8 pfkey_supported:1; // 算法是否可用(是否在内核中)
+	 union {
 		struct xfrm_algo_aead_info aead;
-		struct xfrm_algo_auth_info auth;
-		struct xfrm_algo_encr_info encr;
-		struct xfrm_algo_comp_info comp;
-	} uinfo;
-	struct sadb_alg desc;
+	  struct xfrm_algo_auth_info auth;
+	  struct xfrm_algo_encr_info encr;
+	  struct xfrm_algo_comp_info comp;
+	 } uinfo; // 算法信息联合
+	 struct sadb_alg desc; // 通用算法描述
+
 };
 
 /* XFRM protocol handlers.  */

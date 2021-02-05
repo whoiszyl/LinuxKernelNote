@@ -155,11 +155,12 @@
  /**
   * Standard attribute types to specify validation policy
   */
+  //用于表示netlink头类型
 enum {
-	NLA_UNSPEC,
+	NLA_UNSPEC, //表示长度和类型都是未知的
 	NLA_U8,
 	NLA_U16,
-	NLA_U32,
+	NLA_U32,  //无符号32位整形，较为常见
 	NLA_U64,
 	NLA_STRING,
 	NLA_FLAG,

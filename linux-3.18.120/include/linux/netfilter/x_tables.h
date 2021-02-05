@@ -102,45 +102,58 @@ struct xt_tgdtor_param {
 	u_int8_t family;
 };
 
+/*所有的匹配处理都注册到一个match处理链表中，链表结点的类型就是这里的结构类型。当
+处理匹配时都是调用这里注册的处理函数。每个结点实质上由三个函数构成，一个匹配处
+理函数，一个合法性检查函数，一个析构函数。最后一个是反身指针，指针的作用如注释
+所示。 */
 struct xt_match {
-	struct list_head list;
+	struct list_head list;//用来挂接到匹配链表，必须初始化为{NULL, NULL}；
 
-	const char name[XT_EXTENSION_MAXNAMELEN];
-	u_int8_t revision;
+	const char name[XT_EXTENSION_MAXNAMELEN];//每个match的名字
+	u_int8_t revision;//修订的版本号
 
 	/* Return true or false: return FALSE and set *hotdrop = 1 to
            force immediate packet drop. */
 	/* Arguments changed since 2.6.9, as this must now handle
 	   non-linear skb, using skb_header_pointer and
 	   skb_ip_make_writable. */
+	 //该函数是最主要函数，完成对数据包的匹配条件检查，返回1表示匹配成功，0表示失败；
 	bool (*match)(const struct sk_buff *skb,
 		      struct xt_action_param *);
 
 	/* Called when user tries to insert an entry of this type. */
+	//用于对用户层传入的数据进行合法性检查，如匹配数据长度是否正确，是否是在正确的表中使用等
+	/* 当用户尝试插入此类型的条目时调用 */
 	int (*checkentry)(const struct xt_mtchk_param *);
 
 	/* Called when entry of this type deleted. */
+	/*用于释放该匹配中动态分配的资源，在规则删除此类型的条目时调用*/
 	void (*destroy)(const struct xt_mtdtor_param *);
 #ifdef CONFIG_COMPAT
 	/* Called when userspace align differs from kernel space one */
+	/*当用户空间对齐与内核空间对齐时调用*/
+
 	void (*compat_from_user)(void *dst, const void *src);
 	int (*compat_to_user)(void __user *dst, const void *src);
 #endif
 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	/*如果你是一个模块，设置为THIS_MODULE，否则为NULL */
 	struct module *me;
 
-	const char *table;
-	unsigned int matchsize;
+	const char *table;//这个match所属的表的名字
+	unsigned int matchsize;//match大小
 #ifdef CONFIG_COMPAT
-	unsigned int compatsize;
+	unsigned int compatsize;//比较大小
 #endif
-	unsigned int hooks;
-	unsigned short proto;
+	unsigned int hooks;//match在哪个hook注册
+	unsigned short proto;//协议号
 
-	unsigned short family;
+	unsigned short family;//地址族
 };
 
 /* Registration hooks for targets. */
+/*和match一样，所有的target都注册到这个结构类型的全局链表中，每个target的处理函数
+都是这里注册的函数。和上面的解释一样，这里也主要包含三个函数指针。*/
 struct xt_target {
 	struct list_head list;
 
@@ -156,48 +169,60 @@ struct xt_target {
 	/* Called when user tries to insert an entry of this type:
            hook_mask is a bitmask of hooks from which it can be
            called. */
+    /* 当用户尝试插入此类型的条目时调用：hook_mask是一个钩子的位掩码，可以从中调用它。*/
 	/* Should return 0 on success or an error code otherwise (-Exxxx). */
+	/* 成功时应返回0，否则返回错误代码（-Exxxx）。*/
 	int (*checkentry)(const struct xt_tgchk_param *);
 
 	/* Called when entry of this type deleted. */
+	/* 删除此类型的条目时调用。*/
 	void (*destroy)(const struct xt_tgdtor_param *);
 #ifdef CONFIG_COMPAT
 	/* Called when userspace align differs from kernel space one */
+	/*当用户空间对齐与内核空间对齐时调用*/
+
 	void (*compat_from_user)(void *dst, const void *src);
 	int (*compat_to_user)(void __user *dst, const void *src);
 #endif
 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	/*如果你是一个模块，设置为THIS_MODULE，否则为NULL */
+
 	struct module *me;
 
-	const char *table;
-	unsigned int targetsize;
+	const char *table;//这个target所属的表的名字
+	unsigned int targetsize;//target大小
 #ifdef CONFIG_COMPAT
-	unsigned int compatsize;
+	unsigned int compatsize;//比较大小
 #endif
-	unsigned int hooks;
-	unsigned short proto;
+	unsigned int hooks;//target在哪个hook注册
+	unsigned short proto;//协议号
 
-	unsigned short family;
+	unsigned short family;//地址族
 };
 
 /* Furniture shopping... */
 struct xt_table {
-	struct list_head list;
 
+	/* 用于构建，维护表的链式结构 */
+	struct list_head list;
+	
+	/* 在哪些hook点上注册了hook函数，是一个位图 */
 	/* What hooks you will enter on */
 	unsigned int valid_hooks;
 
+	/*表的实际数据 */
 	/* Man behind the curtain... */
 	struct xt_table_info *private;
 
+	/*是否在模块中定义，如果没有则为NULL*/
 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
 	struct module *me;
 
-	u_int8_t af;		/* address/protocol family */
+	u_int8_t af;		/* address/protocol family   所属协议族 */
 	int priority;		/* hook order */
 
 	/* A unique name... */
-	const char name[XT_TABLE_MAXNAMELEN];
+	const char name[XT_TABLE_MAXNAMELEN]; 	/*表名，如“filter”，“nat”等，供用户空间设置iptables规则，或者内核匹配iptables规则 */
 };
 
 #include <linux/netfilter_ipv4.h>
@@ -205,25 +230,29 @@ struct xt_table {
 /* The table itself */
 struct xt_table_info {
 	/* Size per table */
+	/* 表的大小 */
 	unsigned int size;
-	/* Number of entries: FIXME. --RR */
+	/* Number of entries，即规则的数量 */
 	unsigned int number;
-	/* Initial number of entries. Needed for module usage count */
+	/* Initial number of entries，一般为上一次修改规则时的number，用于模块计数*/
 	unsigned int initial_entries;
 
-	/* Entry points and underflows */
+	/* 在每个hook点作用的entry的偏移(注意是相对于最后一个参数entry的偏移，即第一个hook的第一个ipt_entry的hook_entry为0) */
 	unsigned int hook_entry[NF_INET_NUMHOOKS];
+    /* 规则表的最大下界 */
 	unsigned int underflow[NF_INET_NUMHOOKS];
+	/* 当无规则存在时，对应的 hook_entry与underflow的值都为0*/
 
 	/*
 	 * Number of user chains. Since tables cannot have loops, at most
 	 * @stacksize jumps (number of user chains) can possibly be made.
 	 */
-	unsigned int stacksize;
-	unsigned int __percpu *stackptr;
-	void ***jumpstack;
+	unsigned int stacksize;//用户自定义链的个数
+	unsigned int __percpu *stackptr; //xt_jumpstack_alloc函数分配
+	void ***jumpstack;               //xt_jumpstack_alloc函数分配
 	/* ipt_entry tables: one per CPU */
 	/* Note : this field MUST be the last one, see XT_TABLE_INFO_SZ */
+	/* 规则表入口，即真正的规则存储结构. 在遍历一个规则表时，以此作为表的起始(即第一个ipt_entry)。由定义可知这是一个数组，每个元素对应每个CPU上的规则 入口。 */
 	void *entries[1];
 };
 

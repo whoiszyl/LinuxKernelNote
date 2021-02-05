@@ -33,13 +33,13 @@
 /*
  * Scheduling policies
  */
-#define SCHED_NORMAL		0
-#define SCHED_FIFO		1
-#define SCHED_RR		2
-#define SCHED_BATCH		3
+#define SCHED_NORMAL		0 //按照优先级进行调度（有些地方也说是CFS调度器）
+#define SCHED_FIFO		1 //先进先出的调度算法
+#define SCHED_RR		2//时间片轮转的调度算法
+#define SCHED_BATCH		3//用于非交互的处理机消耗型的进程
 /* SCHED_ISO: reserved but not implemented yet */
-#define SCHED_IDLE		5
-#define SCHED_DEADLINE		6
+#define SCHED_IDLE		5 //系统负载很低时的调度算法
+#define SCHED_DEADLINE		6 //DL调度器总是选择其Deadline距离当前时间点最近的那个任务并调度它执行
 
 /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
 #define SCHED_RESET_ON_FORK     0x40000000

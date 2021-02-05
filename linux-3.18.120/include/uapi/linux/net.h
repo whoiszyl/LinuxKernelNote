@@ -45,11 +45,11 @@
 #define SYS_SENDMMSG	20		/* sys_sendmmsg(2)		*/
 
 typedef enum {
-	SS_FREE = 0,			/* not allocated		*/
-	SS_UNCONNECTED,			/* unconnected to any socket	*/
-	SS_CONNECTING,			/* in process of connecting	*/
-	SS_CONNECTED,			/* connected to socket		*/
-	SS_DISCONNECTING		/* in process of disconnecting	*/
+	SS_FREE = 0,			/* not allocated //该socket还未分配  		*/
+	SS_UNCONNECTED,			/* unconnected to any socket //该socket还未分配  	*/
+	SS_CONNECTING,			/* in process of connecting	//正在连接过程中  */
+	SS_CONNECTED,			/* connected to socket	 //已连向一个socket  	*/
+	SS_DISCONNECTING		/* in process of disconnecting	//正在断开连接的过程中  */
 } socket_state;
 
 #define __SO_ACCEPTCON	(1 << 16)	/* performed a listen		*/

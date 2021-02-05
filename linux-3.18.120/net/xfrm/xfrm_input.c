@@ -93,19 +93,24 @@ static int xfrm_rcv_cb(struct sk_buff *skb, unsigned int family, u8 protocol,
 	return ret;
 }
 
+// 释放安全路径
 void __secpath_destroy(struct sec_path *sp)
 {
 	int i;
+	// 减少安全路径中所有SA的使用计数
 	for (i = 0; i < sp->len; i++)
 		xfrm_state_put(sp->xvec[i]);
+	// 释放安全路径空间
 	kmem_cache_free(secpath_cachep, sp);
 }
 EXPORT_SYMBOL(__secpath_destroy);
 
+// 安全路径复制
 struct sec_path *secpath_dup(struct sec_path *src)
 {
 	struct sec_path *sp;
 
+	// 先分配安全路径结构
 	sp = kmem_cache_alloc(secpath_cachep, GFP_ATOMIC);
 	if (!sp)
 		return NULL;
@@ -114,22 +119,27 @@ struct sec_path *secpath_dup(struct sec_path *src)
 	if (src) {
 		int i;
 
+		// 如果源安全路径结构非空, 将其全部复制到新结构中
 		memcpy(sp, src, sizeof(*sp));
+		// 增加安全路径中所有SA的使用计数
 		for (i = 0; i < sp->len; i++)
 			xfrm_state_hold(sp->xvec[i]);
 	}
+	// 设置该引用计数初始值位1
 	atomic_set(&sp->refcnt, 1);
 	return sp;
 }
 EXPORT_SYMBOL(secpath_dup);
 
 /* Fetch spi and seq from ipsec header */
-
+// 从数据包中解析SPI和序号, 返回值是网络序的
 int xfrm_parse_spi(struct sk_buff *skb, u8 nexthdr, __be32 *spi, __be32 *seq)
 {
 	int offset, offset_seq;
 	int hlen;
 
+	// 通过nexthdr参数来判断协议类型, nexthdr是IPV6里的说法, 在IPV4中就是IP头里的协议字段
+	// 根据不同协议确定数据中SPI和序列号相对数据起始点的偏移
 	switch (nexthdr) {
 	case IPPROTO_AH:
 		hlen = sizeof(struct ip_auth_hdr);
@@ -142,8 +152,11 @@ int xfrm_parse_spi(struct sk_buff *skb, u8 nexthdr, __be32 *spi, __be32 *seq)
 		offset_seq = offsetof(struct ip_esp_hdr, seq_no);
 		break;
 	case IPPROTO_COMP:
+		// 对应压缩协议单独处理
+		// 数据头准备出IP压缩头结构长度
 		if (!pskb_may_pull(skb, sizeof(struct ip_comp_hdr)))
 			return -EINVAL;
+		// SPI值取第3,4字节的数据, 序号为0
 		*spi = htonl(ntohs(*(__be16 *)(skb_transport_header(skb) + 2)));
 		*seq = 0;
 		return 0;
@@ -151,9 +164,11 @@ int xfrm_parse_spi(struct sk_buff *skb, u8 nexthdr, __be32 *spi, __be32 *seq)
 		return 1;
 	}
 
-	if (!pskb_may_pull(skb, hlen))
+	// 数据头准备16字节空间, 这是ip_auth_hdr和ip_esp_hdr结构最小长度
+	if (!pskb_may_pull(skb, hlen))//hlen一般为16
 		return -EINVAL;
 
+	// 根据偏移获取SPI和序号, 注意是网络序的值
 	*spi = *(__be32 *)(skb_transport_header(skb) + offset);
 	*seq = *(__be32 *)(skb_transport_header(skb) + offset_seq);
 	return 0;
@@ -219,6 +234,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 	}
 
 	/* Allocate new secpath or COW existing one. */
+	// 为skb包建立新的安全路径(struct sec_path)
 	if (!skb->sp || atomic_read(&skb->sp->refcnt) != 1) {
 		struct sec_path *sp;
 
@@ -233,17 +249,21 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 	}
 
 	seq = 0;
+	//获取skb中的spi和序列号信息，ipip时spi不为0
 	if (!spi && (err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0) {
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMINHDRERROR);
 		goto drop;
 	}
 
+	//进入循环进行解包操作
 	do {
+		// 循环解包次数太深的话放弃
 		if (skb->sp->len == XFRM_MAX_DEPTH) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINBUFFERERROR);
 			goto drop;
 		}
-
+		
+		// 根据地址, SPI和协议查找SA
 		x = xfrm_state_lookup(net, mark, daddr, spi, nexthdr, family);
 		if (x == NULL) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINNOSTATES);
@@ -257,7 +277,8 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMODEERROR);
 			goto drop;
 		}
-
+		
+		// 以下根据SA定义的操作对数据解码
 		spin_lock(&x->lock);
 		if (unlikely(x->km.state == XFRM_STATE_ACQ)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMACQUIREERROR);
@@ -269,6 +290,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			goto drop_unlock;
 		}
 
+		// 检查由SA指定的封装类型是否和函数指定的封装类型相同
 		if ((x->encap ? x->encap->encap_type : 0) != encap_type) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMISMATCH);
 			goto drop_unlock;
@@ -278,14 +300,16 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATESEQERROR);
 			goto drop_unlock;
 		}
-
+		
+		// SA生存期检查
 		if (xfrm_state_check_expire(x)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEEXPIRED);
 			goto drop_unlock;
 		}
 
 		spin_unlock(&x->lock);
-
+		
+		// type可为esp,ah,ipcomp, ipip等, 对输入数据解密
 		seq_hi = htonl(xfrm_replay_seqhi(x, seq));
 
 		XFRM_SKB_CB(skb)->seq.input.low = seq;
@@ -322,6 +346,7 @@ resume:
 
 		x->repl->advance(x, seq);
 
+		// 包数,字节数统计
 		x->curlft.bytes += skb->len;
 		x->curlft.packets++;
 
@@ -336,12 +361,14 @@ resume:
 			if (inner_mode == NULL)
 				goto drop;
 		}
-
+		
+		// mode可为通道,传输等模式, 对输入数据解封装
 		if (inner_mode->input(x, skb)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMODEERROR);
 			goto drop;
 		}
-
+		
+		// 如果是IPSEC隧道模式，将decaps参数置1，否则表示是传输模式
 		if (x->outer_mode->flags & XFRM_MODE_FLAG_TUNNEL) {
 			decaps = 1;
 			break;
@@ -354,6 +381,8 @@ resume:
 		daddr = &x->id.daddr;
 		family = x->outer_mode->afinfo->family;
 
+		// 看内层协议是否还要继续解包, 不需要解时返回1, 需要解时返回0, 错误返回负数
+		// 协议类型可以多层封装的,比如用AH封装ESP, 就得先解完AH再解ESP
 		err = xfrm_parse_spi(skb, nexthdr, &spi, &seq);
 		if (err < 0) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINHDRERROR);

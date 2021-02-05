@@ -56,7 +56,7 @@ static bool ip_exceeds_mtu(const struct sk_buff *skb, unsigned int mtu)
 	return true;
 }
 
-
+// ip_forward_finish函数主要就是调用dst_output函数
 static int ip_forward_finish(struct sk_buff *skb)
 {
 	struct ip_options *opt	= &(IPCB(skb)->opt);
@@ -70,6 +70,7 @@ static int ip_forward_finish(struct sk_buff *skb)
 	return dst_output(skb);
 }
 
+//数据的转发入口点函数是ip_forward, 进入该函数的数据包还是普通数据包，数据包的路由也是普通路由：
 int ip_forward(struct sk_buff *skb)
 {
 	u32 mtu;
@@ -78,15 +79,18 @@ int ip_forward(struct sk_buff *skb)
 	struct ip_options *opt	= &(IPCB(skb)->opt);
 
 	/* that should never happen */
+	// 转发包也是到自身的包, 不是的话丢包
 	if (skb->pkt_type != PACKET_HOST)
 		goto drop;
 
 	if (unlikely(skb->sk))
 		goto drop;
 
+	//报文为非线性，gso_size不为零，但是gso_type为零，丢弃此类报文
 	if (skb_warn_if_lro(skb))
 		goto drop;
 
+	// 对转发的数据包进行安全策略检查, 检查失败的话丢包
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_FWD, skb))
 		goto drop;
 
@@ -100,44 +104,54 @@ int ip_forward(struct sk_buff *skb)
 	 *	that reaches zero, we must reply an ICMP control message telling
 	 *	that the packet's lifetime expired.
 	 */
+    /*根据RFC，我们必须首先降低TTL字段。如果达到零，我们必须回答ICMP控制消息告诉
+	数据包的寿命过期。*/
+
+	// TTL到头了, 丢包
 	if (ip_hdr(skb)->ttl <= 1)
 		goto too_many_hops;
 
+	// 进入安全路由选路和转发处理, 在此函数中构造数据包的安全路由
 	if (!xfrm4_route_forward(skb))
 		goto drop;
 
+	// 以下是一些常规的路由和TTL处理
 	rt = skb_rtable(skb);
 
 	if (opt->is_strictroute && rt->rt_uses_gateway)
 		goto sr_failed;
 
-	IPCB(skb)->flags |= IPSKB_FORWARDED;
+	IPCB(skb)->flags |= IPSKB_FORWARDED;//flag中添加forward标记，
 	mtu = ip_dst_mtu_maybe_forward(&rt->dst, true);
 	if (!ip_may_fragment(skb) && ip_exceeds_mtu(skb, mtu)) {
 		IP_INC_STATS(dev_net(rt->dst.dev), IPSTATS_MIB_FRAGFAILS);
-		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, //报文长度超过mtu且不允许ip分片，发送icmp消息给发送者
 			  htonl(mtu));
 		goto drop;
 	}
 
 	/* We are about to mangle packet. Copy it! */
+	//扩展报文，以填充mac头
 	if (skb_cow(skb, LL_RESERVED_SPACE(rt->dst.dev)+rt->dst.header_len))
 		goto drop;
 	iph = ip_hdr(skb);
 
 	/* Decrease ttl after skb cow done */
-	ip_decrease_ttl(iph);
+	ip_decrease_ttl(iph); //ip头的ttl减一
 
 	/*
 	 *	We now generate an ICMP HOST REDIRECT giving the route
 	 *	we calculated.
+	 *  现在，我们生成一个ICMP主机重定向，给出我们计算的路由。
 	 */
 	if (IPCB(skb)->flags & IPSKB_DOREDIRECT && !opt->srr &&
 	    !skb_sec_path(skb))
 		ip_rt_send_redirect(skb);
 
+	//根据tos值计算priority值
 	skb->priority = rt_tos2priority(iph->tos);
-
+	
+	// 进行FORWARD点过滤, 过滤后进入ip_forward_finish函数
 	return NF_HOOK(NFPROTO_IPV4, NF_INET_FORWARD, skb, skb->dev,
 		       rt->dst.dev, ip_forward_finish);
 

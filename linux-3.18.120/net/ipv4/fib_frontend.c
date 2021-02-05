@@ -109,6 +109,7 @@ struct fib_table *fib_new_table(struct net *net, u32 id)
 	return tb;
 }
 
+//通过id，从net->ipv4.fib_table_hash中取出对应的路由表
 struct fib_table *fib_get_table(struct net *net, u32 id)
 {
 	struct fib_table *tb;

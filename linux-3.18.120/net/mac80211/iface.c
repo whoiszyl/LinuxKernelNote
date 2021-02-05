@@ -1653,6 +1653,7 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 		if (local->hw.queues >= IEEE80211_NUM_ACS)
 			txqs = IEEE80211_NUM_ACS;
 
+		//分配了网络设备的私有数据，并用ieee80211_if_setup函数建立网络接口
 		ndev = alloc_netdev_mqs(sizeof(*sdata) + local->hw.vif_data_size,
 					name, NET_NAME_UNKNOWN,
 					ieee80211_if_setup, txqs, 1);
@@ -1724,6 +1725,7 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 	sdata->encrypt_headroom = IEEE80211_ENCRYPT_HEADROOM;
 
 	/* setup type-dependent data */
+	//建立网络接口依赖的data
 	ieee80211_setup_sdata(sdata, type);
 
 	if (ndev) {
@@ -1737,6 +1739,7 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 
 		netdev_set_default_ethtool_ops(ndev, &ieee80211_ethtool_ops);
 
+		//将网络设备接口进行注册
 		ret = register_netdevice(ndev);
 		if (ret) {
 			free_netdev(ndev);

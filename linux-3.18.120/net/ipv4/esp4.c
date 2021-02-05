@@ -137,10 +137,11 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
 	__be32 *seqhi;
 
 	/* skb is pure payload to encrypt */
-
+	//从SA中获取进行esp处理的数据、认证加密算法，并计算认证长度
 	aead = x->data;
 	alen = crypto_aead_authsize(aead);
 
+	//填充数据处理
 	tfclen = 0;
 	if (x->tfcpad) {
 		struct xfrm_dst *dst = (struct xfrm_dst *)skb_dst(skb);
@@ -150,10 +151,13 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
 		if (skb->len < padto)
 			tfclen = padto - skb->len;
 	}
+	// 每个加密块大小
 	blksize = ALIGN(crypto_aead_blocksize(aead), 4);
+	// 对齐要加密的数据总长，此"2" 代码ESP 尾中的"填充项长度"、"下一个字"字段
 	clen = ALIGN(skb->len + 2 + tfclen, blksize);
 	plen = clen - skb->len - tfclen;
 
+	// 使数据包可写
 	err = skb_cow_data(skb, tfclen + plen + alen, &trailer);
 	if (err < 0)
 		goto error;
@@ -182,6 +186,7 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
 	sg = asg + sglists;
 
 	/* Fill padding... */
+	// 长度对齐后填充多余长度部分内容
 	tail = skb_tail_pointer(trailer);
 	if (tfclen) {
 		memset(tail, 0, tfclen);
@@ -192,16 +197,25 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
 		for (i = 0; i < plen - 2; i++)
 			tail[i] = i + 1;
 	} while (0);
+		
+	// 倒第二个字节表示填充数据的长度
+	// 最后一个字节表示"下一个头"
 	tail[plen - 2] = plen - 2;
 	tail[plen - 1] = *skb_mac_header(skb);
+	// 设置skb->tail 于ESP 尾之后
 	pskb_put(skb, trailer, clen - skb->len + alen);
 
+	// 在将IP头部分扩展回来
+	// 现在的IP 头作为外部IP 头
 	skb_push(skb, -skb_network_offset(skb));
+	// esp 头跟在IP 头后
 	esph = ip_esp_hdr(skb);
+	// 外部IP 头中的协议是ESP 
 	*skb_mac_header(skb) = IPPROTO_ESP;
 
 	/* this is non-NULL only with UDP Encapsulation */
 	if (x->encap) {
+		// NAT 穿越情况下要将数据封装为UDP 包
 		struct xfrm_encap_tmpl *encap = x->encap;
 		struct udphdr *uh;
 		__be32 *udpdata32;
@@ -234,7 +248,8 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
 
 		*skb_mac_header(skb) = IPPROTO_UDP;
 	}
-
+	
+	// 填充ESP 头中的SPI 和序列号
 	esph->spi = x->id.spi;
 	esph->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.low);
 
@@ -477,13 +492,17 @@ static u32 esp4_get_mtu(struct xfrm_state *x, int mtu)
 		 net_adj) & ~(blksize - 1)) + net_adj - 2;
 }
 
+// 错误处理, 收到ICMP错误包时的处理情况, 此时的skb包是ICMP包
 static int esp4_err(struct sk_buff *skb, u32 info)
 {
 	struct net *net = dev_net(skb->dev);
+	// 应用层, data指向ICMP错误包里的内部IP头
 	const struct iphdr *iph = (const struct iphdr *)skb->data;
+	// ESP头
 	struct ip_esp_hdr *esph = (struct ip_esp_hdr *)(skb->data+(iph->ihl<<2));
 	struct xfrm_state *x;
-
+	
+	// ICMP错误类型检查, 本处理函数只处理"目的不可达"和"需要分片"两种错误
 	switch (icmp_hdr(skb)->type) {
 	case ICMP_DEST_UNREACH:
 		if (icmp_hdr(skb)->code != ICMP_FRAG_NEEDED)
@@ -494,6 +513,7 @@ static int esp4_err(struct sk_buff *skb, u32 info)
 		return 0;
 	}
 
+	// 重新查找SA
 	x = xfrm_state_lookup(net, skb->mark, (const xfrm_address_t *)&iph->daddr,
 			      esph->spi, IPPROTO_ESP, AF_INET);
 	if (!x)
@@ -689,13 +709,21 @@ static const struct xfrm_type esp_type =
 	.owner		= THIS_MODULE,
 	.proto	     	= IPPROTO_ESP,
 	.flags		= XFRM_TYPE_REPLAY_PROT,
+	// 状态初始化
 	.init_state	= esp_init_state,
+	// 协议释放
 	.destructor	= esp_destroy,
+	// 最大长度
 	.get_mtu	= esp4_get_mtu,
+	// 协议输入
 	.input		= esp_input,
+	// 协议输出
 	.output		= esp_output
 };
-
+	
+// ESP协议处理结构, 接收到IPV4包后, 系统根据IP头中的protocol
+// 字段选择相应的上层协议处理函数, 当IP协议号是50时, 数据包将
+// 调用该结构的handler处理函数:
 static struct xfrm4_protocol esp4_protocol = {
 	.handler	=	xfrm4_rcv,
 	.input_handler	=	xfrm_input,
@@ -706,10 +734,12 @@ static struct xfrm4_protocol esp4_protocol = {
 
 static int __init esp4_init(void)
 {
+	// 登记ESP协议的xfrm协议处理结构
 	if (xfrm_register_type(&esp_type, AF_INET) < 0) {
 		pr_info("%s: can't add xfrm type\n", __func__);
 		return -EAGAIN;
 	}
+	// 登记ESP协议到IP协议
 	if (xfrm4_protocol_register(&esp4_protocol, IPPROTO_ESP) < 0) {
 		pr_info("%s: can't add protocol\n", __func__);
 		xfrm_unregister_type(&esp_type, AF_INET);

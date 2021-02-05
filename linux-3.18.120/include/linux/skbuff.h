@@ -167,10 +167,13 @@ struct nf_bridge_info {
 
 struct sk_buff_head {
 	/* These two members must be first. */
+	/* 这两个成员必须放在前面。原因在于对 sk_buff_head 进行操作的时候，可以用 sk_buff
+	结构做类型的强制转换来完成，反过来一样 */
+
 	struct sk_buff	*next;
 	struct sk_buff	*prev;
 
-	__u32		qlen;
+	__u32		qlen; /* 该 sk_buff_head 结构引导的一个链表的节点的个数 */
 	spinlock_t	lock;
 };
 
@@ -295,17 +298,20 @@ struct ubuf_info {
 	unsigned long desc;
 };
 
-/* This data is invariant across clones and lives at
- * the end of the header data, ie. at skb->end.
- */
+/*
+* This data is invariant across clones and lives at the end of the header data, ie. at skb->end.
+* skb_shared_info{}结构并没有定义在 struct sk_buff{}里面，而是在创建 skbuff 时与主缓存区一起动态分配的，位于主缓存区的后面，我们可以用 struct sk_buff{}的成员
+* end 来访问。事实上，内核就是用宏 skb_shinfo(SKB)来访问 skbuff 的 skb_shared_info{}结构的.
+*/
+
 struct skb_shared_info {
-	unsigned char	nr_frags;
+	unsigned char	nr_frags;/*表示frags[]中挂载了多少个分散/聚集I/O缓冲区。并不表示frag_list 链表中IP片段的数目。*/
 	__u8		tx_flags;
 	unsigned short	gso_size;
 	/* Warning: this field is not always filled in (UFO)! */
 	unsigned short	gso_segs;
 	unsigned short  gso_type;
-	struct sk_buff	*frag_list;
+	struct sk_buff	*frag_list;/* frag_list里的数据代表的是独立缓冲区，也就是每个缓冲区都必须作为单独的IP片段而独立传输(分片) */
 	struct skb_shared_hwtstamps hwtstamps;
 	u32		tskey;
 	__be32          ip6_frag_id;
@@ -313,14 +319,33 @@ struct skb_shared_info {
 	/*
 	 * Warning : all fields before dataref are cleared in __alloc_skb()
 	 */
-	atomic_t	dataref;
+	atomic_t	dataref;/* 表示主缓存区的共享计数， skb_clone 会增加该引用计数。需要指出的是，分散聚集 I/O 缓存区和 frag_list 链表中的 skbuff 都有它们各自独
+						 * 立的共享计数。因此增加 dataref 引用计数，并不需要相应增加分散聚集 I/O 缓存区和 frag_list 链表中的 skbuff 的引用计数。这是因为虽然
+						 * dataref 增加了，但主缓存区（包括 skb_shared_info）仍然只有一份，它仍然只拥有一份对分散聚集 I/O 缓存区和 frag_list 链表中的 skbuff
+						 * 的引用。
+						 */
 
 	/* Intermediate layers must ensure that destructor_arg
 	 * remains valid until skb destructor */
 	void *		destructor_arg;
 
 	/* must be last field, see pskb_expand_head() */
-	skb_frag_t	frags[MAX_SKB_FRAGS];
+	/*
+ 	 * 下面的结构变量用于支持分散/聚集 I/O 处理的，它与 IP 数据分段是各自独立的。分散/聚集 I/O 只是让程序和硬件可以使用非相邻内存区域，就好像它们是相邻
+ 	 * 的那样。然而每个片段依然必须尊重其最大尺寸（PMTU）的限制。也就是说，即使 PAGE_SIZE 大于 PMTU，当 sk_buff 里的数据（由 skb->data 所指）加上由 frags
+	 * 所引用的数据片段达到 PMTU 时，就需要建立一个新的 sk_buff。
+	 * 记住： frags 向量里的数据是主缓冲区中数据的扩展，这些 frags 引用的数据片段不需要任何报头，因为一个 sk_buff 实例的所有数据片段都是和同一个 IP 封包相
+	 * 关。
+	 * 分散/聚合 I/O 功能是否使用，要看输出的网络设备是否具备该功能，如果该网络设备具备该功能，则 netdev->features 会设置 NETIF_F_SG 标志。
+	 * #define MAX_SKB_FRAGS (65536/PAGE_SIZE + 2) //To allow 64K frame to be packed as single skb without frag_list
+	 *typedef struct skb_frag_struct skb_frag_t;
+	 *struct skb_frag_struct {
+	 * struct page *page; //指向内存页面指针。
+	 * __u32 page_offset; //页面开端相对偏移量。
+	 * __u32 size; //该片段的大小。
+	 * };
+	 */
+	skb_frag_t	frags[MAX_SKB_FRAGS];/* 在支持分散/聚集 I/O 时，除第一个之外的每个缓冲区都存在这个指针数组指向的内存页中。 */
 };
 
 /* We divide dataref into two halves.  The higher 16 bits hold references
@@ -507,16 +532,22 @@ static inline u32 skb_mstamp_us_delta(const struct skb_mstamp *t1,
 
 struct sk_buff {
 	/* These two members must be first. */
-	struct sk_buff		*next;
-	struct sk_buff		*prev;
+	//这两个指针使sk_buff构成了双向链表
+	//next和prev指针：协议栈中经常用到sk_buff的队列，队列通过sk_buff中的指针相连接。
+	//这两个指针用来连接相关的skb的（例如有分片，则将这些分片连在一起。）
+	struct sk_buff		*next;// 链表中下一个缓存;
+	struct sk_buff		*prev;// 链表中前一个;
 
+	//报文到达或者离开的时间戳;
 	union {
 		ktime_t		tstamp;
 		struct skb_mstamp skb_mstamp;
 	};
 
-	struct sock		*sk;
-	struct net_device	*dev;
+	struct sock		*sk; //指向报文所属的套接字指针;
+						//指向一个拥有这个 sk_buff 的 sock 结构的指针，这个指针在网络包由本机发出
+						//或者由本机进程接收时有效，如果这个 sk_buff 只在转发中使用，则这个指针是 NULL;
+	struct net_device	*dev;//表示一个接收或者发送报文的网络设备;
 
 	/*
 	 * This is the control buffer. It is free to use for every
@@ -524,36 +555,68 @@ struct sk_buff {
 	 * want to keep them across layers you have to do a skb_clone()
 	 * first. This is owned by whoever has the skb queued ATM.
 	 */
-	char			cb[48] __aligned(8);
+	char			cb[48] __aligned(8);//保存每一层的控制信息，以及私有信息；
 
-	unsigned long		_skb_refdst;
-	void			(*destructor)(struct sk_buff *skb);
+	unsigned long		_skb_refdst; //指向des_entry结构，记录了到达目的地的路由信息，以及其他的一些网络特征信息。
+	void			(*destructor)(struct sk_buff *skb);// 这是析构函数，后期在skb内存销毁时会用到
+														/* Destruct function
+															* 这个函数指针可以初始化成一个在缓冲区释放时完成某些动作的函数。如果缓冲区不属于一个 socket，这个函
+															* 数指针通常是不会被赋值的。如果缓冲区属于一个 socket，这个函数指针会被赋值为 sock_rfree 或 sock_wfree
+															*（分别由 skb_set_owner_r 或 skb_set_owner_w 函数初始化）。这两个 sock_xxx 函数用于更新 socket 的队列中的
+															*内存容量。
+														*/
 #ifdef CONFIG_XFRM
-	struct	sec_path	*sp;
+	struct	sec_path	*sp; //安全路径，用于xfrm
 #endif
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
-	struct nf_conntrack	*nfct;
+	/*
+	* 当内核支持连接跟踪，则 skb->nfct 指向连接跟踪的&ct->general，它是一个 nf_conntrack 结构。
+	* struct nf_conntrack {
+	* atomic_t use;
+	* };
+	*/
+
+	struct nf_conntrack	*nfct; //netfilter跟踪的连接信息；
 #endif
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
-	struct nf_bridge_info	*nf_bridge;
+	/*
+	* 当 skb_buff 同步桥模式，并且桥下支持 netfilter，则为*nf_bridge 指针分配该结构，用于保存一下私有信息。
+	* struct nf_bridge_info {
+	* atomic_t use;
+	* struct net_device *physindev;
+	* struct net_device *physoutdev;
+	* unsigned int mask;
+	* unsigned long data[32 / sizeof(unsigned long)];* };
+	*/
+
+	struct nf_bridge_info	*nf_bridge; //桥接相关信息；
 #endif
-	unsigned int		len,
-				data_len;
-	__u16			mac_len,
-				hdr_len;
+	unsigned int		len, //当前协议数据包的长度，包括主缓冲区中数据长度和分片中数据长度 表示缓冲区中实际的数据量。
+							 //（个人理解为当前协议层包头和数据区域长度）。
+							 //skb的组成是(sk_buff控制+线性数据+非线性数据)->（skb_shared_info）组成！
+							 //len = 主缓存区数据（skb->data 和 skb->tail 之间的数据）量 + 分散/聚集 I/O 缓存区数据（skb_shinfo(SKB)->frags指定的缓存区数*据量+skb_shinfo(SKB)->frag_list链表的缓存区数据量。
+							 //在sk_buff这个里面没有实际的数据，这里仅仅是控制信息，数据是通过后面的data指针指向其他内
+    						 //存块的！那个内存块中是线性数据和非线性数据！那么len就是length(线性数据) + length(非线性数据)！！！
+    						 //当缓存区从一个网络分成移往下一个网络分层时，其值就会变化，因为在协议栈中往上移动时报头会被丢弃，但是往下移动时报
+							 //头就会添加进来。 len也会把协议报头算在内，如“数据预留和对其（skb_reserve、skb_put、skb_push、skb_pull）等函数会调整len大小。
+				data_len;   //表示除主缓存区以外的其它缓存区的数据量。
+							//data_len = 分散/聚集 I/O 缓存区数据（skb_shinfo(SKB)->frags 指定的缓存区数据） 量 +skb_shinfo(SKB)->frag_list 链表的缓存区数据量;
+	__u16			mac_len, //指的是mac头长度;
+				hdr_len;    //用于clone时，表示clone的skb的头长度；
 
 	/* Following fields are _not_ copied in __copy_skb_header()
 	 * Note that queue_mapping is here mostly to fill a hole.
+	 *注意，队列映射在这里主要是为了填补漏洞。 
 	 */
 	kmemcheck_bitfield_begin(flags1);
-	__u16			queue_mapping;
-	__u8			cloned:1,
-				nohdr:1,
-				fclone:2,
-				peeked:1,
+	__u16			queue_mapping; //队列映射
+	__u8			cloned:1,//是否允许被克隆
+				nohdr:1,//运载时不能修改头部
+				fclone:2,//数据包克隆状态
+				peeked:1,//数据包是否处于操作状态
 				head_frag:1,
-				xmit_more:1,
-				pfmemalloc:1;
+				xmit_more:1,//更多的SKB等待这个队列
+				pfmemalloc:1;//skbuff从PFMEMISOLC储备中分配
 	kmemcheck_bitfield_end(flags1);
 
 	/* fields enclosed in headers_start/headers_end are copied
@@ -572,13 +635,28 @@ struct sk_buff {
 #define PKT_TYPE_OFFSET()	offsetof(struct sk_buff, __pkt_type_offset)
 
 	__u8			__pkt_type_offset[0];
-	__u8			pkt_type:3;
-	__u8			ignore_df:1;
-	__u8			nfctinfo:3;
-	__u8			nf_trace:1;
+	__u8			pkt_type:3;//报文类型
+								/* 表示帧的类型。分类是由 L2 的目的地址来决定的。可能的取值都在 include/linux/if_packet.h 中定义。对以太网设备来说，
+									这个变量由 eth_type_trans()函数初始化。包含下面的值：
+									PACKET_HOST 已接收帧的目的 MAC 地址与收到它的网络设备的 MAC 地址相等。换句话说，这个包是发给本机的。
+									由于该值是 0，所以数据包初始化就是这个类型。
+									PACKET_MULTICAST 已接收帧的目的 MAC 地址是该接口已注册的一个多播地址。
+									PACKET_BROADCAST 已接收帧的目的 MAC 地址是接收接口的广播地址。
+									PACKET_OTHERHOST 已接收帧的目的 MAC 地址与收到它的网络设备的 MAC 地址不同（不管是单播，多播还是广播）。
+									因此，在桥模式下该类型数据包会被转发，在路由模式下该类型数据包会被丢弃。
+									PACKET_OUTGOING 数据包正被发送。 此表示的用户是 Decnet 协议， 并且给每个网络设备分流器一个输出封包副本的
+									函数（参考 dev_queue_xmit_nit 函数）。
+									PACKET_LOOPBAK 数据包正发送至 lookback 设备。由于有这个标记，在处理 loopback 设备时，内核可以跳过一些真实
+									设备所需要的操作。
+									PACKET_FASTROUTE 用 fastroute 功能路由封包。 2.6 内核版本不再支持 fastroute。 
+								*/
+									
+	__u8			ignore_df:1;//是否允许分片相关标志位
+	__u8			nfctinfo:3;//数据包连接关系
+	__u8			nf_trace:1;//netfilter对数据包的跟踪标志
 
-	__u8			ip_summed:2;
-	__u8			ooo_okay:1;
+	__u8			ip_summed:2;//ip校验和标志
+	__u8			ooo_okay:1;//允许一个套接字到队列的映射被改变
 	__u8			l4_hash:1;
 	__u8			sw_hash:1;
 	__u8			wifi_acked_valid:1;
@@ -608,17 +686,21 @@ struct sk_buff {
 #endif
 
 	union {
-		__wsum		csum;
+		__wsum		csum;//校验和;
 		struct {
-			__u16	csum_start;
-			__u16	csum_offset;
+			__u16	csum_start;//skb->head即校验和计算起始点；
+			__u16	csum_offset;//校验和存储位置偏移（以csum_start处起始偏移csum_offset大小）;
 		};
 	};
-	__u32			priority;
-	int			skb_iif;
-	__u32			hash;
-	__be16			vlan_proto;
-	__u16			vlan_tci;
+	__u32			priority;//报文排队优先级，取决于ip中的tos域
+							 //这个变量描述发送或转发包的 QoS 类别。如果包是本地生成的， socket 层会设置 priority 变量。如果包是将要被转发的，
+							 //rt_tos2priority 函数会根据 ip 头中的 Tos 域来计算付给这个变量的值。
+
+
+	int			skb_iif;//报文到达接口的索引号；
+	__u32			hash;//数据包的hash值；
+	__be16			vlan_proto;//vlan封装协议；
+	__u16			vlan_tci;//vlan标签控制信息；
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	unsigned int	napi_id;
 #endif
@@ -636,26 +718,38 @@ struct sk_buff {
 		__u8		inner_ipproto;
 	};
 
-	__u16			inner_transport_header;
-	__u16			inner_network_header;
+	__u16			inner_transport_header;//内部封装的传输层头；
+	__u16			inner_network_header;//内部封装的网络层头；
 	__u16			inner_mac_header;
 
-	__be16			protocol;
-	__u16			transport_header;
-	__u16			network_header;
-	__u16			mac_header;
+	__be16			protocol;//协议
+							  /* protocol 是从 L2 层的设备驱动程序的角度来看，就是用在下一个较高层（L3）的协议。 它是大端字节序（即网络字节序）。
+								* 典型协议有 IP、 IPv6、以及 ARP； 完整的列表在 include/linux/if_ether.h 中(ETH_P_XXX)。由于每种协议都有自己的函数处
+								* 理例程用来处理输入的封包，因此驱动程序使用这个字段通知其上层该使用哪个处理例程。每个驱动程序会调用 netif_rx
+								* 用来启动上面的网络分层的处理例程，所以，在该函数被调用前 protocol 字段必须初始化。（以太网驱动程序中用
+								* eth_type_trans() 返回值设置该字段）
+							*/
+	__u16			transport_header;//传输层头
+	__u16			network_header;//网络层头
+	__u16			mac_header;//链路层头
 
 	/* private: */
 	__u32			headers_end[0];
 	/* public: */
 
 	/* These elements must be at the end, see alloc_skb() for details.  */
-	sk_buff_data_t		tail;
-	sk_buff_data_t		end;
-	unsigned char		*head,
-				*data;
-	unsigned int		truesize;
-	atomic_t		users;
+	/*
+	* 它们表示缓冲区和数据部分的边界。在每一层申请缓冲区时，它会分配比协议头或协议数据大的空间。 Head 和 end 指向缓冲区的头部和尾部，而 data 和 tail 指
+	* 向实际数据的头部和尾部。每一层会在 head 和 data 之间填充协议头，或者在 tail 和 end 之间添加新的协议数据。 注意，这里的 end 和 tail 均不包含末尾地址，
+	* 即它们都是指向相关缓冲区的末尾地址+1。 注意：接收数据包时，数据包在哪一层协议处理， data 指针就指向那一层协议的头部，不要擅自改变 data 指针，除
+	* 非你要将数据包交给另一层协议处理。
+	*/
+	sk_buff_data_t		tail;//保存数据被容的结尾；
+	sk_buff_data_t		end;//分配的内存块的结尾；
+	unsigned char		*head,// 分配的内存块的起始位置；指向数据区中开始的位置（非实际数据区域开始位置）
+				*data;//保存数据内容的首地址；（实际数据区域开始位置）
+	unsigned int		truesize;//该缓冲区分配的所有总的内存，包括：skb_buff + 所有数据大小；
+	atomic_t		users;//保存引用skb_buff的数量
 };
 
 #ifdef __KERNEL__

@@ -586,13 +586,16 @@ void crypto_destroy_tfm(void *mem, struct crypto_tfm *tfm)
 	kzfree(mem);
 }
 EXPORT_SYMBOL_GPL(crypto_destroy_tfm);
-
+// 算法探测
 int crypto_has_alg(const char *name, u32 type, u32 mask)
 {
 	int ret = 0;
+	// 根据名称, 类型和掩码探测算法模块
 	struct crypto_alg *alg = crypto_alg_mod_lookup(name, type, mask);
 
+	// 正确返回找到 
 	if (!IS_ERR(alg)) {
+		// 减少模块计数, 返回1
 		crypto_mod_put(alg);
 		ret = 1;
 	}

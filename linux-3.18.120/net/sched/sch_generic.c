@@ -581,11 +581,14 @@ struct Qdisc_ops pfifo_fast_ops __read_mostly = {
 
 static struct lock_class_key qdisc_tx_busylock;
 
+// 分配新的Qdisc结构, Qdisc的操作结构由函数参数指定
 struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 			  const struct Qdisc_ops *ops)
 {
 	void *p;
 	struct Qdisc *sch;
+	// Qdisc空间按32字节对齐
+	// 增加私有数据空间
 	unsigned int size = QDISC_ALIGN(sizeof(*sch)) + ops->priv_size;
 	int err = -ENOBUFS;
 	struct net_device *dev = dev_queue->dev;
@@ -595,6 +598,7 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 
 	if (!p)
 		goto errout;
+	// 确保从缓冲区中的sch到缓冲区结束点空间是32字节对齐的
 	sch = (struct Qdisc *) QDISC_ALIGN((unsigned long) p);
 	/* if we got non aligned memory, ask more and do alignment ourself */
 	if (sch != p) {

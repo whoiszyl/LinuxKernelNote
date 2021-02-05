@@ -1397,6 +1397,7 @@ static int check_leaf(struct fib_table *tb, struct trie *t, struct leaf *l,
 int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 		     struct fib_result *res, int fib_flags)
 {
+	/* 得到真正的route hash表 */
 	struct trie *t = (struct trie *) tb->tb_data;
 	int ret;
 	struct rt_trie_node *n;
@@ -1419,13 +1420,17 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 	t->stats.gets++;
 #endif
 
+	//首先查看fib_table指向的是否仅仅是leaf，而没有tnode，对于fib_table只有一个leaf的情况下，直接调用check_leaf进行
+	//验证
 	/* Just a leaf? */
 	if (IS_LEAF(n)) {
 		ret = check_leaf(tb, t, (struct leaf *)n, key, flp, res, fib_flags);
 		goto found;
 	}
-
+	
+	//对于是tnode的情况的处理
 	pn = (struct tnode *) n;
+	//该变量用于记录已经匹配到的比特数。
 	chopped_off = 0;
 
 	while (pn) {
@@ -1433,9 +1438,11 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 		bits = pn->bits;
 
 		if (!chopped_off)
+			//找到不同的bit，这是为了获得孩子节点。
 			cindex = tkey_extract_bits(mask_pfx(key, current_prefix_length),
 						   pos, bits);
-
+		
+		//获得孩子节点，这个孩子节点可能是tnode也可能是leaf
 		n = tnode_get_child_rcu(pn, cindex);
 
 		if (n == NULL) {
@@ -1445,13 +1452,15 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 			goto backtrace;
 		}
 
+		//如果孩子节点是一个leaf节点，则调用check_leaf检查是否是需要的路由项，并将结果存放在res中。
 		if (IS_LEAF(n)) {
 			ret = check_leaf(tb, t, (struct leaf *)n, key, flp, res, fib_flags);
 			if (ret > 0)
 				goto backtrace;
 			goto found;
 		}
-
+		
+		//如果孩子节点是一个tnode，则需要进行迭代到其孩子进行上述查找过程。	
 		cn = (struct tnode *)n;
 
 		/*
@@ -1483,6 +1492,7 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 		/* NOTA BENE: Checking only skipped bits
 		   for the new node here */
 
+		//第一次进入该函数这里的current_prefix_length的长度是不会小于pos+bits的。
 		if (current_prefix_length < pos+bits) {
 			if (tkey_extract_bits(cn->key, current_prefix_length,
 						cn->pos - current_prefix_length)
@@ -1529,6 +1539,16 @@ int fib_table_lookup(struct fib_table *tb, const struct flowi4 *flp,
 		 * the search key, enter the "prefix matching"
 		 * state.directly.
 		 */
+
+		//当根据pos和bits值没有找到搜索的key的话，进入前缀匹配模式。
+		/************************************************************************************************
+		***该模式存在意义如下：
+		***对于ipv4路由表有如下两项：
+		***192.168.20.16/28
+		***192.168.0.0/16
+		***如果需要查找192.168.20.19则上面两个都是匹配的，但是取哪个好呢？内核使用最常匹配原则，即认为192.168.20.16
+		***（子网掩码长度是28）这一项是匹配的，通常default 项的前缀是最短的，其作用是在其他路由项均不能匹配时会使用***default项*[摘自维基百科，longest prefix match]，这个函数的chopped_off就是忽略prefix的长度，这样匹配成功的概率会***变大。对于图12.2.4的情况的trie树，查找192.168.0.100路由项的情况是不会进入backtrace标号开始的语句的。
+		**********************************************************************************************/
 		if (pref_mismatch) {
 			/* fls(x) = __fls(x) + 1 */
 			int mp = KEYLENGTH - __fls(pref_mismatch) - 1;

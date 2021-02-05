@@ -71,6 +71,33 @@
 
 	lat = max ((L-B)/R, (L-M)/P)
 
+	描述。
+	--------------
+	数据流遵循TBF与速率R和深度B，如果对于任何
+	传输比特数的时间间隔 t_i...t_f 
+	不超过B+R*(t_f-t_i)。
+	这个定义的打包版本：
+	在时刻t_i上服务的大小s_i的分组序列
+	服从TBF，如果对于任何i <= k：
+	s_i+....+s_k <= B + R*(t_k - t_i)	算法。
+	----------
+	N(t_i)初始为B/R，N（T）随时间连续增长：
+	N(t+delta) = min{B/R, N(t) + delta}
+	如果队列中的第一个包具有长度s，则可能是
+	当S/R <=n（t*）时，仅在Ty*时发送，
+	在这种情况下，n（t）跳跃：
+	N(t_* + 0) = N(t_* - 0) - S/R.
+
+
+	实际上，QoS需要两个TBF应用于数据流。
+	其中一个控制稳态突发大小，另一个控制
+	速率p（峰值速率）和深度m（等于链路MTU）
+	在较小的时间尺度上限制突发。
+	很容易看出P＞R，B＞M。
+	TBF相当于一个单一的TBF。
+	当TBF在整形模式下工作时，潜伏期估计为：
+	lat = max ((L-B)/R, (L-M)/P)
+
 
 	NOTES.
 	------
@@ -429,14 +456,17 @@ done:
 }
 
 static int tbf_init(struct Qdisc *sch, struct nlattr *opt)
-{
+{	
+	// TBF私有数据
 	struct tbf_sched_data *q = qdisc_priv(sch);
 
 	if (opt == NULL)
 		return -EINVAL;
-
+	//获取当前时间
 	q->t_c = ktime_get_ns();
+	//定时器
 	qdisc_watchdog_init(&q->watchdog, sch);
+	// 内部流控初始化为noop_qdisc
 	q->qdisc = &noop_qdisc;
 
 	return tbf_change(sch, opt);

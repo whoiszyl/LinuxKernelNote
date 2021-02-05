@@ -3269,20 +3269,25 @@ struct cfg80211_cached_keys;
  * @event_lock: (private) lock for event list
  * @owner_nlportid: (private) owner socket port ID
  */
-struct wireless_dev {
-	struct wiphy *wiphy;
-	enum nl80211_iftype iftype;
+struct wireless_dev { //无线设备状态结构体
+	struct wiphy *wiphy;//指向硬件描述的指针
+	enum nl80211_iftype iftype;//接口类型
 
 	/* the remainder of this struct should be private to cfg80211 */
-	struct list_head list;
-	struct net_device *netdev;
+	struct list_head list;//(私有）用于收集接口
+	struct net_device *netdev;//(私有）用于引用回netdev，可能是％NULL
 
-	u32 identifier;
+	u32 identifier;//(私有）nl80211中使用的标识符来识别它无线设备，如果它没有netdev
 
-	struct list_head mgmt_registrations;
-	spinlock_t mgmt_registrations_lock;
+	struct list_head mgmt_registrations;//管理帧的注册列表
+	spinlock_t mgmt_registrations_lock;//锁定列表
 
-	struct mutex mtx;
+	struct mutex mtx;//mutex用于锁定此结构中的数据，可供驱动程序使用和一些API函数需要它保持
+
+	/*use_4addr :表示此接口使用4addr模式，必须是在add_interface上设置驱动程序（如果支持）BEFORE注册之前
+	netdev，否则可以由驱动程序只读使用，将更新通过cfg80211在change_interface上
+	p2p_started:如果这是已启动的P2P设备，则为true
+	*/
 
 	bool use_4addr, p2p_started;
 
@@ -3291,31 +3296,31 @@ struct wireless_dev {
 	/* currently used for IBSS and SME - might be rearranged later */
 	u8 ssid[IEEE80211_MAX_SSID_LEN];
 	u8 ssid_len, mesh_id_len, mesh_id_up_len;
-	struct cfg80211_conn *conn;
-	struct cfg80211_cached_keys *connect_keys;
+	struct cfg80211_conn *conn;//cfg80211软件SME连接状态机数据
+	struct cfg80211_cached_keys *connect_keys;//建立连接后设置的（私有）密钥
 
-	struct list_head event_list;
-	spinlock_t event_lock;
+	struct list_head event_list;//列表，用于内部事件处理
+	spinlock_t event_lock;//锁定事件列表
 
-	struct cfg80211_internal_bss *current_bss; /* associated / joined */
-	struct cfg80211_chan_def preset_chandef;
-	struct cfg80211_chan_def chandef;
+	struct cfg80211_internal_bss *current_bss; /* associated / joined  由内部配置代码使用*/
+	struct cfg80211_chan_def preset_chandef;//由内部配置代码使用跟踪稍后用于AP的频道
+	struct cfg80211_chan_def chandef;//由内部配置代码用于跟踪
 
-	bool ibss_fixed;
-	bool ibss_dfs_possible;
+	bool ibss_fixed;//IBSS使用固定的BSSID
+	bool ibss_dfs_possible;//IBSS可能会更改为DFS频道
 
-	bool ps;
-	int ps_timeout;
+	bool ps;//启用了powersave模式
+	int ps_timeout;//动态powersave超时
 
-	int beacon_interval;
+	int beacon_interval;//此设备上用于传输的信标间隔信标，0无效时
 
-	u32 ap_unexpected_nlportid;
+	u32 ap_unexpected_nlportid;//应用程序的（私有）netlink端口ID注册意外的3级帧（AP模式）
 
-	bool cac_started;
-	unsigned long cac_start_time;
-	unsigned int cac_time_ms;
+	bool cac_started;//如果已启动DFS通道可用性检查，则为true
+	unsigned long cac_start_time;//输入dfs状态时的时间戳（jiffies）
+	unsigned int cac_time_ms;//以毫秒为单位的CAC时间
 
-	u32 owner_nlportid;
+	u32 owner_nlportid;//所有者套接字端口ID
 
 #ifdef CONFIG_CFG80211_WEXT
 	/* wext data */
@@ -3329,9 +3334,10 @@ struct wireless_dev {
 		u8 ssid[IEEE80211_MAX_SSID_LEN];
 		s8 default_key, default_mgmt_key;
 		bool prev_bssid_valid;
-	} wext;
+	} wext;//(私有）由内部无线扩展compat代码使用
 #endif
 };
+
 
 static inline u8 *wdev_address(struct wireless_dev *wdev)
 {

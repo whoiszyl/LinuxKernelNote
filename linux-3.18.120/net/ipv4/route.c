@@ -1465,6 +1465,8 @@ static int ip_route_input_mc(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 		if (err < 0)
 			goto e_err;
 	}
+	
+	/*申请并初始化dst_entry，由于rtable的第一个成员就是dst_entry，多以这里直接进行赋值，没有使用策略路由*/
 	rth = rt_dst_alloc(dev_net(dev)->loopback_dev,
 			   IN_DEV_CONF_GET(in_dev, NOPOLICY), false, false);
 	if (!rth)
@@ -1473,6 +1475,8 @@ static int ip_route_input_mc(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 #ifdef CONFIG_IP_ROUTE_CLASSID
 	rth->dst.tclassid = itag;
 #endif
+
+	//初始化rtable字段的其它项。
 	rth->dst.output = ip_rt_bug;
 
 	rth->rt_genid	= rt_genid_ipv4(dev_net(dev));
@@ -1495,6 +1499,7 @@ static int ip_route_input_mc(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 #endif
 	RT_CACHE_STAT_INC(in_slow_mc);
 
+	//将rtable的dst成员地址赋值给skb。
 	skb_dst_set(skb, &rth->dst);
 	return 0;
 
@@ -1553,6 +1558,7 @@ static int __mkroute_input(struct sk_buff *skb,
 		return -EINVAL;
 	}
 
+	//该函数给了数据包的源地址、输入Interface以及目的地址、oif、tos；检查源地址的正确性，例如不能是广播地址和local地址.
 	err = fib_validate_source(skb, saddr, daddr, tos, FIB_RES_OIF(*res),
 				  in_dev->dev, in_dev, &itag);
 	if (err < 0) {
@@ -1596,7 +1602,8 @@ static int __mkroute_input(struct sk_buff *skb,
 			goto out;
 		}
 	}
-
+	
+	//创建一个dst_entry入口项，并将其赋值给rth，rtable的第一个字段就是指向dst_entry。该函数还对dst_entry进行了初始化。
 	rth = rt_dst_alloc(out_dev->dev,
 			   IN_DEV_CONF_GET(in_dev, NOPOLICY),
 			   IN_DEV_CONF_GET(out_dev, NOXFRM), do_cache);
@@ -1605,6 +1612,7 @@ static int __mkroute_input(struct sk_buff *skb,
 		goto cleanup;
 	}
 
+	//rtable相关字段初始化
 	rth->rt_genid = rt_genid_ipv4(dev_net(rth->dst.dev));
 	rth->rt_flags = flags;
 	rth->rt_type = res->type;
@@ -1615,11 +1623,13 @@ static int __mkroute_input(struct sk_buff *skb,
 	rth->rt_uses_gateway = 0;
 	INIT_LIST_HEAD(&rth->rt_uncached);
 	RT_CACHE_STAT_INC(in_slow_tot);
-
+	//here
 	rth->dst.input = ip_forward;
 	rth->dst.output = ip_output;
-
+	
+	//rtable的最后一项是nexthop，这里设置rth的nexthop项,并设置路由缓存。
 	rt_set_nexthop(rth, daddr, res, fnhe, res->fi, res->type, itag);
+	//将rtable的dst_entry入口项设置成skb的路由项。4.2节的路由内容至此结束。
 	skb_dst_set(skb, &rth->dst);
 out:
 	err = 0;
@@ -1657,13 +1667,13 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 			       u8 tos, struct net_device *dev)
 {
 	struct fib_result res;
-	struct in_device *in_dev = __in_dev_get_rcu(dev);
+	struct in_device *in_dev = __in_dev_get_rcu(dev);//这里要使用输入网络设备dev，增加引用计数
 	struct flowi4	fl4;
 	unsigned int	flags = 0;
 	u32		itag = 0;
 	struct rtable	*rth;
 	int		err = -EINVAL;
-	struct net    *net = dev_net(dev);
+	struct net    *net = dev_net(dev); //获取输入设备dev的网络net信息，有IP\mac
 	bool do_cache;
 
 	/* IP on this device is disabled. */
@@ -1674,10 +1684,12 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	/* Check for the most weird martians, which can be not detected
 	   by fib_lookup.
 	 */
+	//源IP是否为组播、广播、回环
 
 	if (ipv4_is_multicast(saddr) || ipv4_is_lbcast(saddr))
-		goto martian_source;
+		goto martian_source;//处理非法源IP报文
 
+    //目的地址是否全为1，源IP和目的IP全为0
 	res.fi = NULL;
 	if (ipv4_is_lbcast(daddr) || (saddr == 0 && daddr == 0))
 		goto brd_input;
@@ -1685,8 +1697,9 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	/* Accept zero addresses only to limited broadcast;
 	 * I even do not know to fix it or not. Waiting for complains :-)
 	 */
+	 //源IP是否全为0
 	if (ipv4_is_zeronet(saddr))
-		goto martian_source;
+		goto martian_source;//处理非法源IP报文
 
 	if (ipv4_is_zeronet(daddr))
 		goto martian_destination;
@@ -1699,12 +1712,13 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 			goto martian_destination;
 	} else if (ipv4_is_loopback(saddr)) {
 		if (!IN_DEV_NET_ROUTE_LOCALNET(in_dev, net))
-			goto martian_source;
+			goto martian_source;//处理非法源IP报文
 	}
 
 	/*
 	 *	Now we are ready to route packet.
 	 */
+	 //流量分类信息初始化，也是流控
 	fl4.flowi4_oif = 0;
 	fl4.flowi4_iif = dev->ifindex;
 	fl4.flowi4_mark = skb->mark;
@@ -1712,6 +1726,8 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	fl4.flowi4_scope = RT_SCOPE_UNIVERSE;
 	fl4.daddr = daddr;
 	fl4.saddr = saddr;
+	//查询路由信息，判断是转发还是上传到本地
+	//路由查找路由查找的结果存放在res（results）里。
 	err = fib_lookup(net, &fl4, &res);
 	if (err != 0) {
 		if (!IN_DEV_FORWARD(in_dev))
@@ -1736,7 +1752,8 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	}
 	if (res.type != RTN_UNICAST)
 		goto martian_destination;
-
+	//路由信息为转发
+	//根据路由查找结果，创建一个路由缓存项。 
 	err = ip_mkroute_input(skb, &res, &fl4, in_dev, daddr, saddr, tos);
 out:	return err;
 
@@ -1754,7 +1771,7 @@ brd_input:
 	res.type = RTN_BROADCAST;
 	RT_CACHE_STAT_INC(in_brd);
 
-local_input:
+local_input://路由信息到本地
 	do_cache = false;
 	if (res.fi) {
 		if (!itag) {
@@ -1772,7 +1789,7 @@ local_input:
 			   IN_DEV_CONF_GET(in_dev, NOPOLICY), false, do_cache);
 	if (!rth)
 		goto e_nobufs;
-
+	//进入netfilter的LOCAL_IN
 	rth->dst.input= ip_local_deliver;
 	rth->dst.output= ip_rt_bug;
 #ifdef CONFIG_IP_ROUTE_CLASSID
@@ -1855,12 +1872,15 @@ int ip_route_input_noref(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	   Note, that multicast routers are not affected, because
 	   route cache entry is created eventually.
 	 */
+	 //是否是组播
 	if (ipv4_is_multicast(daddr)) {
+		//获取网卡信息
 		struct in_device *in_dev = __in_dev_get_rcu(dev);
 
 		if (in_dev) {
 			int our = ip_check_mc_rcu(in_dev, daddr, saddr,
 						  ip_hdr(skb)->protocol);
+	//判断组播是否是发送给自己
 			if (our
 #ifdef CONFIG_IP_MROUTE
 				||
@@ -1868,6 +1888,7 @@ int ip_route_input_noref(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 			     IN_DEV_MFORWARD(in_dev))
 #endif
 			   ) {
+			   //生成多播路由，生成路由缓存
 				int res = ip_route_input_mc(skb, daddr, saddr,
 							    tos, dev, our);
 				rcu_read_unlock();
@@ -1877,6 +1898,7 @@ int ip_route_input_noref(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 		rcu_read_unlock();
 		return -EINVAL;
 	}
+	//进入ip_route_input_slow调用fib_lookup查找路由信息
 	res = ip_route_input_slow(skb, daddr, saddr, tos, dev);
 	rcu_read_unlock();
 	return res;

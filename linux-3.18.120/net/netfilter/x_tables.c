@@ -43,10 +43,12 @@ struct compat_delta {
 	int delta; /* delta in 32bit user land */
 };
 
+/*xt变量是在net/netfilter/x_tables.c文件中的xt_init()函数中被分配存储空间并完成初始化的，
+  xt分配的大小以当前内核所能支持的协议簇的数量有关*/
 struct xt_af {
 	struct mutex mutex;
-	struct list_head match;
-	struct list_head target;
+	struct list_head match;//该协议的match集合         每个match模块都会被注册到这里
+	struct list_head target;//该协议的taget集合         每个target模块都会被注册到这里
 #ifdef CONFIG_COMPAT
 	struct mutex compat_mutex;
 	struct compat_delta *compat_tab;
@@ -1172,9 +1174,9 @@ xt_replace_table(struct xt_table *table,
 EXPORT_SYMBOL_GPL(xt_replace_table);
 
 struct xt_table *xt_register_table(struct net *net,
-				   const struct xt_table *input_table,
-				   struct xt_table_info *bootstrap,
-				   struct xt_table_info *newinfo)
+				   const struct xt_table *input_table, //packet_filter
+				   struct xt_table_info *bootstrap, //空信息
+				   struct xt_table_info *newinfo)  //newinfo替换掉bootstrap
 {
 	int ret;
 	struct xt_table_info *private;
@@ -1189,6 +1191,7 @@ struct xt_table *xt_register_table(struct net *net,
 
 	mutex_lock(&xt[table->af].mutex);
 	/* Don't autoload: we'd eat our tail... */
+	//判断该表是否已经存在
 	list_for_each_entry(t, &net->xt.tables[table->af], list) {
 		if (strcmp(t->name, table->name) == 0) {
 			ret = -EEXIST;
@@ -1197,6 +1200,7 @@ struct xt_table *xt_register_table(struct net *net,
 	}
 
 	/* Simplifies replace_table code. */
+	//替换表的信息
 	table->private = bootstrap;
 
 	if (!xt_replace_table(table, 0, newinfo, &ret))
@@ -1208,6 +1212,7 @@ struct xt_table *xt_register_table(struct net *net,
 	/* save number of initial entries */
 	private->initial_entries = private->number;
 
+	//将表插入到net结构中的tables管理链表中
 	list_add(&table->list, &net->xt.tables[table->af]);
 	mutex_unlock(&xt[table->af].mutex);
 	return table;
@@ -1639,6 +1644,8 @@ static struct pernet_operations xt_net_ops = {
 	.init = xt_net_init,
 };
 
+
+//以双向链表的形式被组织起来
 static int __init xt_init(void)
 {
 	unsigned int i;

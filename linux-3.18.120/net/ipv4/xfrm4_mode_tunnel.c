@@ -33,12 +33,14 @@ static int xfrm4_mode_tunnel_output(struct xfrm_state *x, struct sk_buff *skb)
 	struct iphdr *top_iph;
 	int flags;
 
+	// 数据头部增加外部IP头的长度
 	skb_set_network_header(skb, -x->props.header_len);
 	skb->mac_header = skb->network_header +
 			  offsetof(struct iphdr, protocol);
 	skb->transport_header = skb->network_header + sizeof(*top_iph);
 	top_iph = ip_hdr(skb);
 
+	// 填写外部IP头参数
 	top_iph->ihl = 5;
 	top_iph->version = 4;
 
@@ -56,25 +58,31 @@ static int xfrm4_mode_tunnel_output(struct xfrm_state *x, struct sk_buff *skb)
 	if (flags & XFRM_STATE_NOECN)
 		IP_ECN_clear(top_iph);
 
+	// 处理分片包情况
 	top_iph->frag_off = (flags & XFRM_STATE_NOPMTUDISC) ?
 		0 : (XFRM_MODE_SKB_CB(skb)->frag_off & htons(IP_DF));
 
 	top_iph->ttl = ip4_dst_hoplimit(dst->child);
 
+	// 外部源地址用proposal中的源地址
 	top_iph->saddr = x->props.saddr.a4;
+	// 外部目的地址是SA中的目的地址
 	top_iph->daddr = x->id.daddr.a4;
 	ip_select_ident(skb, NULL);
 
 	return 0;
 }
 
+// 通道模式下的接收函数, 解封装
 static int xfrm4_mode_tunnel_input(struct xfrm_state *x, struct sk_buff *skb)
 {
 	int err = -EINVAL;
 
+	// IP协议为IPPROTO_IPIP(4)
 	if (XFRM_MODE_SKB_CB(skb)->protocol != IPPROTO_IPIP)
 		goto out;
 
+	// 需要在skb头留出IP头的长度(20字节)
 	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto out;
 
@@ -82,11 +90,14 @@ static int xfrm4_mode_tunnel_input(struct xfrm_state *x, struct sk_buff *skb)
 	if (err)
 		goto out;
 
+	// 复制dscp字段
 	if (x->props.flags & XFRM_STATE_DECAP_DSCP)
 		ipv4_copy_dscp(XFRM_MODE_SKB_CB(skb)->tos, ipip_hdr(skb));
+	// 非XFRM_STATE_NOECN时进行ECN解封装
 	if (!(x->props.flags & XFRM_STATE_NOECN))
 		ipip_ecn_decapsulate(skb);
 
+	// 将硬件地址挪到数据包缓冲区前
 	skb_reset_network_header(skb);
 	skb_mac_header_rebuild(skb);
 

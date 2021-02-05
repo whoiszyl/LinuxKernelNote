@@ -24,6 +24,7 @@ int xfrm4_extract_input(struct xfrm_state *x, struct sk_buff *skb)
 
 static inline int xfrm4_rcv_encap_finish(struct sk_buff *skb)
 {
+	// 如果没有路由, 重新查找路由
 	if (skb_dst(skb) == NULL) {
 		const struct iphdr *iph = ip_hdr(skb);
 
@@ -31,6 +32,7 @@ static inline int xfrm4_rcv_encap_finish(struct sk_buff *skb)
 					 iph->tos, skb->dev))
 			goto drop;
 	}
+	// 调用相关的路由输入函数
 	return dst_input(skb);
 drop:
 	kfree_skb(skb);
@@ -47,6 +49,12 @@ int xfrm4_transport_finish(struct sk_buff *skb, int async)
 	if (!async)
 		return -iph->protocol;
 #endif
+	// 如果定义NETFILTER, 进入PRE_ROUTING链处理,然后进入路由选择处理
+	// 其实现在已经处于INPUT点, 但解码后需要将该包作为一个新包看待
+	// 可能需要进行目的NAT操作, 这时候可能目的地址就会改变不是到自身
+	// 的了, 因此需要将其相当于是放回PRE_PROUTING点去操作, 重新找路由
+	// 这也说明可以制定针对解码后明文包的NAT规则,在还是加密包的时候不匹配
+	// 但解码后能匹配上
 
 	__skb_push(skb, skb->data - skb_network_header(skb));
 	iph->tot_len = htons(skb->len);

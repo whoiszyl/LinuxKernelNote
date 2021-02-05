@@ -38,6 +38,8 @@ static struct dst_entry *__xfrm4_dst_lookup(struct net *net, struct flowi4 *fl4,
 	return ERR_CAST(rt);
 }
 
+// IPV4的路由查找, 就是普通是路由查找方法
+// 返回0成功
 static struct dst_entry *xfrm4_dst_lookup(struct net *net, int tos,
 					  const xfrm_address_t *saddr,
 					  const xfrm_address_t *daddr)
@@ -47,16 +49,20 @@ static struct dst_entry *xfrm4_dst_lookup(struct net *net, int tos,
 	return __xfrm4_dst_lookup(net, &fl4, tos, saddr, daddr);
 }
 
+// 查找地址, 这个函数是在通道模式下, 源地址没明确指定时调用的,查找获取
+// 外部头中的源地址
 static int xfrm4_get_saddr(struct net *net,
 			   xfrm_address_t *saddr, xfrm_address_t *daddr)
 {
 	struct dst_entry *dst;
 	struct flowi4 fl4;
 
+	// 根据目的地址找路由
 	dst = __xfrm4_dst_lookup(net, &fl4, 0, NULL, daddr);
 	if (IS_ERR(dst))
 		return -EHOSTUNREACH;
 
+	// 将找到的路由项中的源地址作为通道模式下的外部源地址
 	saddr->a4 = fl4.saddr;
 	dst_release(dst);
 	return 0;
@@ -98,10 +104,12 @@ static int xfrm4_fill_dst(struct xfrm_dst *xdst, struct net_device *dev,
 	return 0;
 }
 
+ // 查找策略中的安全路由, 查找条件是流结构的定义的参数
 static void
 _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
 {
 	const struct iphdr *iph = ip_hdr(skb);
+	// xprth是IP头后的上层协议头起始
 	u8 *xprth = skb_network_header(skb) + iph->ihl * 4;
 	struct flowi4 *fl4 = &fl->u.ip4;
 	int oif = 0;
@@ -109,27 +117,34 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
 	if (skb_dst(skb))
 		oif = skb_dst(skb)->dev->ifindex;
 
+	// 先将流结构清零
 	memset(fl4, 0, sizeof(struct flowi4));
 	fl4->flowi4_mark = skb->mark;
 	fl4->flowi4_oif = reverse ? skb->skb_iif : oif;
 
+	// 数据包必须不是分片包
 	if (!ip_is_fragment(iph)) {
 		switch (iph->protocol) {
+		// 对UDP(17), TCP(6), SCTP(132)和DCCP(33)协议, 要提取源端口和目的端口
+		// 头4字节是源端口和目的端口
 		case IPPROTO_UDP:
 		case IPPROTO_UDPLITE:
 		case IPPROTO_TCP:
 		case IPPROTO_SCTP:
 		case IPPROTO_DCCP:
+			// 要让skb预留出IP头长度加4字节的长度, 在IP层data应该指向最外面的IP头
 			if (xprth + 4 < skb->data ||
 			    pskb_may_pull(skb, xprth + 4 - skb->data)) {
 				__be16 *ports = (__be16 *)xprth;
 
+				// 提取端口参数
 				fl4->fl4_sport = ports[!!reverse];
 				fl4->fl4_dport = ports[!reverse];
 			}
 			break;
 
 		case IPPROTO_ICMP:
+			// 对ICMP(1)协议要提取ICMP包的类型和编码, 2字节
 			if (pskb_may_pull(skb, xprth + 2 - skb->data)) {
 				u8 *icmp = xprth;
 
@@ -139,6 +154,7 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
 			break;
 
 		case IPPROTO_ESP:
+			// 对于ESP(50)协议要提取其中的SPI值, 4字节
 			if (pskb_may_pull(skb, xprth + 4 - skb->data)) {
 				__be32 *ehdr = (__be32 *)xprth;
 
@@ -147,6 +163,7 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
 			break;
 
 		case IPPROTO_AH:
+			// 对于AH(51)协议要提取其中的SPI值, 4字节
 			if (pskb_may_pull(skb, xprth + 8 - skb->data)) {
 				__be32 *ah_hdr = (__be32 *)xprth;
 
@@ -155,6 +172,7 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
 			break;
 
 		case IPPROTO_COMP:
+			// 对于COMP(108)协议要提取其中CPI值作为SPI值, 2字节
 			if (pskb_may_pull(skb, xprth + 4 - skb->data)) {
 				__be16 *ipcomp_hdr = (__be16 *)xprth;
 
@@ -180,6 +198,7 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl, int reverse)
 			break;
 		}
 	}
+	// 填充协议,源地址,目的地址, TOS参数
 	fl4->flowi4_proto = iph->protocol;
 	fl4->daddr = reverse ? iph->saddr : iph->daddr;
 	fl4->saddr = reverse ? iph->daddr : iph->saddr;
@@ -194,12 +213,14 @@ static inline int xfrm4_garbage_collect(struct dst_ops *ops)
 	return (dst_entries_get_slow(ops) > ops->gc_thresh * 2);
 }
 
+// 更新路由的MTU
 static void xfrm4_update_pmtu(struct dst_entry *dst, struct sock *sk,
 			      struct sk_buff *skb, u32 mtu)
 {
 	struct xfrm_dst *xdst = (struct xfrm_dst *)dst;
 	struct dst_entry *path = xdst->route;
 
+	// 调用的是安全路由的原始普通路由的MTU更新操作
 	path->ops->update_pmtu(path, sk, skb, mtu);
 }
 
@@ -212,12 +233,14 @@ static void xfrm4_redirect(struct dst_entry *dst, struct sock *sk,
 	path->ops->redirect(path, sk, skb);
 }
 
+// 释放安全路由
 static void xfrm4_dst_destroy(struct dst_entry *dst)
 {
 	struct xfrm_dst *xdst = (struct xfrm_dst *)dst;
 
 	dst_destroy_metrics_generic(dst);
 
+	// 释放安全路由
 	xfrm_dst_destroy(xdst);
 }
 
@@ -229,7 +252,8 @@ static void xfrm4_dst_ifdown(struct dst_entry *dst, struct net_device *dev,
 
 	xfrm_dst_ifdown(dst, dev);
 }
-
+				 
+//对于IPSEC的IPV4安全路由
 static struct dst_ops xfrm4_dst_ops_template = {
 	.family =		AF_INET,
 	.protocol =		cpu_to_be16(ETH_P_IP),
@@ -243,6 +267,7 @@ static struct dst_ops xfrm4_dst_ops_template = {
 	.gc_thresh =		32768,
 };
 
+//主要是定义IPV4的策略信息结构:
 static struct xfrm_policy_afinfo xfrm4_policy_afinfo = {
 	.family = 		AF_INET,
 	.dst_ops =		&xfrm4_dst_ops_template,

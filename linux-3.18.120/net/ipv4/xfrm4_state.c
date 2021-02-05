@@ -25,17 +25,28 @@ static void
 __xfrm4_init_tempsel(struct xfrm_selector *sel, const struct flowi *fl)
 {
 	const struct flowi4 *fl4 = &fl->u.ip4;
-
+	// 状态中的选择子参数赋值
+	// 目的地址
 	sel->daddr.a4 = fl4->daddr;
+	// 源地址
 	sel->saddr.a4 = fl4->saddr;
+	// 目的端口
 	sel->dport = xfrm_flowi_dport(fl, &fl4->uli);
+	// 目的端口掩码
 	sel->dport_mask = htons(0xffff);
+	// 源端口
 	sel->sport = xfrm_flowi_sport(fl, &fl4->uli);
+	// 源端口掩码
 	sel->sport_mask = htons(0xffff);
+	// 协议族
 	sel->family = AF_INET;
+	// 目的地址长度
 	sel->prefixlen_d = 32;
+	// 源地址长度
 	sel->prefixlen_s = 32;
+	// 协议
 	sel->proto = fl4->flowi4_proto;
+	// 网卡位置
 	sel->ifindex = fl4->flowi4_oif;
 }
 

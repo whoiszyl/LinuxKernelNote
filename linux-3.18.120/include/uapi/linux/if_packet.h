@@ -21,12 +21,12 @@ struct sockaddr_ll {
 
 /* Packet types */
 
-#define PACKET_HOST		0		/* To us		*/
-#define PACKET_BROADCAST	1		/* To all		*/
-#define PACKET_MULTICAST	2		/* To group		*/
-#define PACKET_OTHERHOST	3		/* To someone else 	*/
-#define PACKET_OUTGOING		4		/* Outgoing of any type */
-#define PACKET_LOOPBACK		5		/* MC/BRD frame looped back */
+#define PACKET_HOST		0		/* To us	该报文的目的地是本机	*/
+#define PACKET_BROADCAST	1		/* To all	广播数据包， 该报文的目的地是所有主机	*/
+#define PACKET_MULTICAST	2		/* To group		组播数据包*/
+#define PACKET_OTHERHOST	3		/* To someone else 	到其他主机的数据包， 在 VLAN 接口接收数据时有重要的作用*/
+#define PACKET_OUTGOING		4		/* Outgoing of any type 它不是“发送到外部主机的报文”，而是指接收的类型，这种类型用在 AF_PACKET 的套接字上，这是 Linux 的扩展*/
+#define PACKET_LOOPBACK		5		/* MC/BRD frame looped back  MC/BRD 的 loopback 帧（用户层不可见）*/
 #define PACKET_USER		6		/* To user space	*/
 #define PACKET_KERNEL		7		/* To kernel space	*/
 /* Unused, PACKET_FASTROUTE and PACKET_LOOPBACK are invisible to user space */

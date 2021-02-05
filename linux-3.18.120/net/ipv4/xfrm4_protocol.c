@@ -173,7 +173,9 @@ static const struct net_protocol esp4_protocol = {
 	.no_policy	=	1,
 	.netns_ok	=	1,
 };
-
+	
+// AH协议处理结构, 接收到IPV4包后, 系统根据IP头中的protocol字段选择相应的上层协议处理
+// 函数, 当IP协议号是51时, 数据包将调用该结构的handler处理函数:
 static const struct net_protocol ah4_protocol = {
 	.handler	=	xfrm4_ah_rcv,
 	.err_handler	=	xfrm4_ah_err,

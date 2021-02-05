@@ -46,15 +46,15 @@ struct crypto_instance {
 };
 
 struct crypto_template {
-	struct list_head list;
-	struct hlist_head instances;
-	struct module *module;
+	struct list_head list; //模版链表成员，用于注册
+	struct hlist_head instances; //算法实例链表首部
+	struct module *module;  //模块指针
 
-	struct crypto_instance *(*alloc)(struct rtattr **tb);
-	void (*free)(struct crypto_instance *inst);
+	struct crypto_instance *(*alloc)(struct rtattr **tb); //算法实例分配
+	void (*free)(struct crypto_instance *inst);//算法实例释放
 	int (*create)(struct crypto_template *tmpl, struct rtattr **tb);
 
-	char name[CRYPTO_MAX_ALG_NAME];
+	char name[CRYPTO_MAX_ALG_NAME];//模版名称
 };
 
 struct crypto_spawn {

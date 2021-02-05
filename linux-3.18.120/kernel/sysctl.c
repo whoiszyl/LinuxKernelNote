@@ -1701,6 +1701,7 @@ static struct ctl_table dev_table[] = {
 	{ }
 };
 
+/*这个函数会在proc/sys目录下建立五个目录，这五个目录在sysctl_base_table有定义*/
 int __init sysctl_init(void)
 {
 	struct ctl_table_header *hdr;

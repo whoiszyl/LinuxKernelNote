@@ -223,11 +223,17 @@ static inline int fib_lookup(struct net *net, const struct flowi4 *flp,
 			     struct fib_result *res)
 {
 	struct fib_table *table;
-
+	
+	 /* 
+     先查询本地地址路由表
+     本地路由表保存本地地址，多播等，属于需要发送到本机的地址信息。
+     */
 	table = fib_get_table(net, RT_TABLE_LOCAL);
 	if (!fib_table_lookup(table, flp, res, FIB_LOOKUP_NOREF))
 		return 0;
-
+	/*
+	再查询main路由表，这个是咱们设置路由或路由daemon设置的路由表 
+	*/
 	table = fib_get_table(net, RT_TABLE_MAIN);
 	if (!fib_table_lookup(table, flp, res, FIB_LOOKUP_NOREF))
 		return 0;

@@ -15,12 +15,18 @@ typedef unsigned long kernel_ulong_t;
 
 #define PCI_ANY_ID (~0)
 
+/* pci设备配置寄存器 */
 struct pci_device_id {
-	__u32 vendor, device;		/* Vendor and device ID or PCI_ANY_ID*/
-	__u32 subvendor, subdevice;	/* Subsystem ID's or PCI_ANY_ID */
-	__u32 class, class_mask;	/* (class,subclass,prog-if) triplet */
-	kernel_ulong_t driver_data;	/* Data private to the driver */
+    /* 厂商id，设备id */
+    __u32 vendor, device;        /* Vendor and device ID or PCI_ANY_ID*/
+    /* 子系统厂商id，子系统设备id */
+    __u32 subvendor, subdevice;    /* Subsystem ID's or PCI_ANY_ID */
+    /* 类，类掩码，使驱动程序可以指定支持某一种pci设备 */
+    __u32 class, class_mask;    /* (class,subclass,prog-if) triplet */
+    /* 保存于设备相关的私有信息 */
+    kernel_ulong_t driver_data;    /* Data private to the driver */
 };
+
 
 
 #define IEEE1394_MATCH_VENDOR_ID	0x0001

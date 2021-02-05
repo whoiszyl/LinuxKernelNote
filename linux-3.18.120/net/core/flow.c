@@ -337,6 +337,7 @@ static void flow_cache_flush_per_cpu(void *data)
 	tasklet_schedule(tasklet);
 }
 
+// 删减安全路由
 void flow_cache_flush(struct net *net)
 {
 	struct flow_flush_info info;

@@ -1435,6 +1435,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct sock *rsk;
 
+	///如果为TCP_ESTABLISHED状态,则进入相关处理  
 	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
 		struct dst_entry *dst = sk->sk_rx_dst;
 
@@ -1450,6 +1451,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 		return 0;
 	}
 
+	///进行包头的合法性校验
 	if (skb->len < tcp_hdrlen(skb) || tcp_checksum_complete(skb))
 		goto csum_err;
 
@@ -1541,9 +1543,12 @@ bool tcp_prequeue(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 启用了latency || 没有进程读取数据 */
 	if (sysctl_tcp_low_latency || !tp->ucopy.task)
 		return false;
 
+	/* 长度<= tcp头部长度，无数据&& prequeue队列长度为0，空队列
+	 队列为空，无数据skb不入队，有数据或者之前队列中有skb，则入队，防止乱序??   */
 	if (skb->len <= tcp_hdrlen(skb) &&
 	    skb_queue_len(&tp->ucopy.prequeue) == 0)
 		return false;
@@ -1554,28 +1559,36 @@ bool tcp_prequeue(struct sock *sk, struct sk_buff *skb)
 	 * Instead of doing full sk_rx_dst validity here, let's perform
 	 * an optimistic check.
 	 */
+	 /* 释放skb路由缓存 */
 	if (likely(sk->sk_rx_dst))
 		skb_dst_drop(skb);
 	else
 		skb_dst_force_safe(skb);
 
+	/* 加入队列尾部 */
 	__skb_queue_tail(&tp->ucopy.prequeue, skb);
+	/* 内存增加 */
 	tp->ucopy.memory += skb->truesize;
 	if (tp->ucopy.memory > sk->sk_rcvbuf) {
 		struct sk_buff *skb1;
 
 		BUG_ON(sock_owned_by_user(sk));
 
+		/* skb出队，调用tcp_v4_do_rcv处理 */
 		while ((skb1 = __skb_dequeue(&tp->ucopy.prequeue)) != NULL) {
 			sk_backlog_rcv(sk, skb1);
 			NET_INC_STATS_BH(sock_net(sk),
 					 LINUX_MIB_TCPPREQUEUEDROPPED);
 		}
 
+		/* 重置消耗内存 */
 		tp->ucopy.memory = 0;
-	} else if (skb_queue_len(&tp->ucopy.prequeue) == 1) {
+	}/* 空队列新增的第一个skb */
+	else if (skb_queue_len(&tp->ucopy.prequeue) == 1) {
+		 /* 唤醒进程可读 */
 		wake_up_interruptible_sync_poll(sk_sleep(sk),
 					   POLLIN | POLLRDNORM | POLLRDBAND);
+		/* 没有ack要发送，则设置延迟ack定时器 */
 		if (!inet_csk_ack_scheduled(sk))
 			inet_csk_reset_xmit_timer(sk, ICSK_TIME_DACK,
 						  (3 * tcp_rto_min(sk)) / 4,
@@ -1593,23 +1606,31 @@ int tcp_v4_rcv(struct sk_buff *skb)
 {
 	const struct iphdr *iph;
 	const struct tcphdr *th;
+	/*状态被维护在数据结构struct sock里面，因而我们要根据IP地址以及TCP头里面的内容，
+	在tcp_hashinfo中找到这个包对应的struct sock，从而得到这个包对应的连接的状态，
+	tcp_hashinfo包含了所有tcp所用到的hash信息*/
 	struct sock *sk;
 	int ret;
 	struct net *net = dev_net(skb->dev);
 
+	//如果不是发往本地的数据包，则直接丢弃
 	if (skb->pkt_type != PACKET_HOST)
 		goto discard_it;
 
 	/* Count it even if it's bad */
 	TCP_INC_STATS_BH(net, TCP_MIB_INSEGS);
 
+	//包长是否大于TCP头的长度
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		goto discard_it;
 
+	//取得TCP首部
 	th = tcp_hdr(skb);
 
+	//检查TCP首部的长度和TCP首部中的doff字段是否匹配
 	if (th->doff < sizeof(struct tcphdr) / 4)
 		goto bad_packet;
+	//检查TCP首部到TCP数据之间的偏移是否越界
 	if (!pskb_may_pull(skb, th->doff * 4))
 		goto discard_it;
 
@@ -1618,9 +1639,11 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
 
+	//tcp数据包的初始化检测
 	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo))
 		goto csum_error;
 
+	//获取tcp和IP头
 	th = tcp_hdr(skb);
 	iph = ip_hdr(skb);
 	/* This is tricky : We move IPCB at its correct location into TCP_SKB_CB()
@@ -1630,6 +1653,9 @@ int tcp_v4_rcv(struct sk_buff *skb)
 		sizeof(struct inet_skb_parm));
 	barrier();
 
+	/*（TCP_SKB_CB(skb)：定义在tcp.h是获取一个实际指向skb->cb[0]的tcp_skb_cb类型指针；
+	将到达的首部剥离后，从中拷贝一些信息到这个变量，供tcp控制功能使用；
+	tcp_skb_cb是在tcp刚收到时填写在包中的）*/
 	TCP_SKB_CB(skb)->seq = ntohl(th->seq);
 	TCP_SKB_CB(skb)->end_seq = (TCP_SKB_CB(skb)->seq + th->syn + th->fin +
 				    skb->len - th->doff * 4);
@@ -1639,6 +1665,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	TCP_SKB_CB(skb)->ip_dsfield = ipv4_get_dsfield(iph);
 	TCP_SKB_CB(skb)->sacked	 = 0;
 
+	/*查找socket*/
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, th->source, th->dest);
 	if (!sk)
 		goto no_tcp_socket;
@@ -1652,6 +1679,7 @@ process:
 		goto discard_and_relse;
 	}
 
+	//检查是否被xfrm安全框架禁止
 	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
 		goto discard_and_relse;
 
@@ -1662,10 +1690,12 @@ process:
 	 *  o We're expecting an MD5'd packet and this is no MD5 tcp option
 	 *  o There is an MD5 option and we're not expecting one
 	 */
+	 //RFC 2385
 	if (tcp_v4_inbound_md5_hash(sk, skb))
 		goto discard_and_relse;
 #endif
 
+	//重新设置skb中防火墙相关的字段值
 	nf_reset(skb);
 
 	if (sk_filter(sk, skb))
@@ -1676,10 +1706,14 @@ process:
 
 	bh_lock_sock_nested(sk);
 	ret = 0;
+	//当前这个sock是不是存在一个用户态进程正在操作sk，如果sk_lock.owned被赋值说明进程持有sk
 	if (!sock_owned_by_user(sk)) {
+		//据报文加入pre_queue
 		if (!tcp_prequeue(sk, skb))
+			//无法加入到pre_queue，则走正常处理流程
 			ret = tcp_v4_do_rcv(sk, skb);
-	} else if (unlikely(sk_add_backlog(sk, skb,
+	}//如果没有用户态进程操作sk则添加到backlog队列中
+	else if (unlikely(sk_add_backlog(sk, skb,
 					   sk->sk_rcvbuf + sk->sk_sndbuf))) {
 		bh_unlock_sock(sk);
 		NET_INC_STATS_BH(net, LINUX_MIB_TCPBACKLOGDROP);
@@ -1713,6 +1747,7 @@ discard_and_relse:
 	sock_put(sk);
 	goto discard_it;
 
+/*TCP在该状态下则丢弃任何接收到的包并转入后续的特殊处理*/
 do_time_wait:
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
 		inet_twsk_put(inet_twsk(sk));

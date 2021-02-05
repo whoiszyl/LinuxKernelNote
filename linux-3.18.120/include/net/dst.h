@@ -32,20 +32,20 @@ struct sk_buff;
 
 struct dst_entry {
 	struct rcu_head		rcu_head;
-	struct dst_entry	*child;
-	struct net_device       *dev;
-	struct  dst_ops	        *ops;
+	struct dst_entry	*child;   //后继路由
+	struct net_device       *dev; //关联的设备
+	struct  dst_ops	        *ops; //路由操作结构
 	unsigned long		_metrics;
 	unsigned long           expires;
-	struct dst_entry	*path;
+	struct dst_entry	*path;    //路由的路径
 	struct dst_entry	*from;
 #ifdef CONFIG_XFRM
 	struct xfrm_state	*xfrm;
 #else
 	void			*__pad1;
 #endif
-	int			(*input)(struct sk_buff *);
-	int			(*output)(struct sock *sk, struct sk_buff *skb);
+	int			(*input)(struct sk_buff *);  //输入钩子函数
+	int			(*output)(struct sock *sk, struct sk_buff *skb); //输出钩子函数
 
 	unsigned short		flags;
 #define DST_HOST		0x0001
@@ -70,13 +70,13 @@ struct dst_entry {
 	 * Negative values are used by the implementation layer code to
 	 * force invocation of the dst_ops->check() method.
 	 */
-	short			obsolete;
+	short			obsolete;  //标记是否过时
 #define DST_OBSOLETE_NONE	0
 #define DST_OBSOLETE_DEAD	2
 #define DST_OBSOLETE_FORCE_CHK	-1
 #define DST_OBSOLETE_KILL	-2
-	unsigned short		header_len;	/* more space at head required */
-	unsigned short		trailer_len;	/* space to reserve at tail */
+	unsigned short		header_len;	/* more space at head required */  //路由的头部长度
+	unsigned short		trailer_len;	/* space to reserve at tail */  //路由的尾部长度
 #ifdef CONFIG_IP_ROUTE_CLASSID
 	__u32			tclassid;
 #else
@@ -94,9 +94,9 @@ struct dst_entry {
 	 * __refcnt wants to be on a different cache line from
 	 * input/output/ops or performance tanks badly
 	 */
-	atomic_t		__refcnt;	/* client references	*/
+	atomic_t		__refcnt;	/* client references	*/ //路由的引用计数
 	int			__use;
-	unsigned long		lastuse;
+	unsigned long		lastuse; //上次使用的时间，可以度量路由的有效性
 	union {
 		struct dst_entry	*next;
 		struct rtable __rcu	*rt_next;

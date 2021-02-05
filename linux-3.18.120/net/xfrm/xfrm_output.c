@@ -38,9 +38,13 @@ static int xfrm_skb_check_space(struct sk_buff *skb)
 	return pskb_expand_head(skb, nhead, ntail, GFP_ATOMIC);
 }
 
+// 按安全路由链表的安全路由处理数据, 该链表反映了多个SA对数据包进行处理
+// 链表是在__xfrm4_bundle_create函数中建立的
 static int xfrm_output_one(struct sk_buff *skb, int err)
 {
+	// 安全路由
 	struct dst_entry *dst = skb_dst(skb);
+	// 相关SA
 	struct xfrm_state *x = dst->xfrm;
 	struct net *net = xs_net(x);
 
@@ -48,12 +52,14 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
 		goto resume;
 
 	do {
+		// SA合法性检查
 		err = xfrm_skb_check_space(skb);
 		if (err) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
 			goto error_nolock;
 		}
 
+		// 调用模式输出函数, 如通道封装, 此时外部IP头协议为IPIP
 		err = x->outer_mode->output(x, skb);
 		if (err) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTSTATEMODEERROR);
@@ -79,7 +85,8 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTSTATESEQERROR);
 			goto error;
 		}
-
+		
+		// 更新SA中的当前生命期结构中的包和字节计数
 		x->curlft.bytes += skb->len;
 		x->curlft.packets++;
 
@@ -97,12 +104,14 @@ resume:
 			goto error_nolock;
 		}
 
+		// 转移到下一个子路由 
 		dst = skb_dst_pop(skb);
 		if (!dst) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
 			err = -EHOSTUNREACH;
 			goto error_nolock;
 		}
+		// dst和x参数更新为子路由中的安全路由和SA
 		skb_dst_set(skb, dst);
 		x = dst->xfrm;
 	} while (x && !(x->outer_mode->flags & XFRM_MODE_FLAG_TUNNEL));
@@ -119,16 +128,21 @@ out:
 
 int xfrm_output_resume(struct sk_buff *skb, int err)
 {
+	// 根据安全路由包装要发送数据
 	while (likely((err = xfrm_output_one(skb, err)) == 0)) {
+		// 处理成功
+		// 释放skb中的netfilter信息
 		nf_reset(skb);
 
 		err = skb_dst(skb)->ops->local_out(skb);
 		if (unlikely(err != 1))
 			goto out;
-
+		
+		// 如果已经没有SA, 就只是个普通包了, 路由发送(ip_output)返回, 退出循环
 		if (!skb_dst(skb)->xfrm)
 			return dst_output(skb);
 
+		// 如果还有SA, 目前还只是中间状态, 还可以进行SNAT操作, 进入POST_ROUTING点处理
 		err = nf_hook(skb_dst(skb)->ops->family,
 			      NF_INET_POST_ROUTING, skb,
 			      NULL, skb_dst(skb)->dev, xfrm_output2);
@@ -182,7 +196,8 @@ int xfrm_output(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb_dst(skb)->dev);
 	int err;
-
+	
+	// 如果skb包是gso
 	if (skb_is_gso(skb))
 		return xfrm_output_gso(skb);
 

@@ -1014,85 +1014,184 @@ typedef u16 (*select_queue_fallback_t)(struct net_device *dev,
  *	those the driver believes to be appropriate.
  */
 struct net_device_ops {
-	int			(*ndo_init)(struct net_device *dev);
-	void			(*ndo_uninit)(struct net_device *dev);
+	int			(*ndo_init)(struct net_device *dev);//注册网络设备时调用，驱动程序一般不使用，虚拟网络设备可能使用
+	void			(*ndo_uninit)(struct net_device *dev);//网络设备卸载时调用，驱动程序一般使用
+
+  /*1、禁止所有中断、关闭载波（netif_carrier_off）；	
+	2、分配并初始化传输和接收描述符环内存（使用dma_alloc_coherent分配确保EMAC和CPU都可以访问）；
+	3、分配发送skb处理状态的链表或者数组空间（使用kzalloc），其实也可以用sk_buff_head相关的数据结构和函数；	
+	4、初始化接收描述符环，包括分配struct sk_buff以及数据缓存区（netdev_alloc_skb），并且进行DMA映射（dma_map_single）；
+	5、注册中断相关函数（request_irq）；
+	6、初始化MAC硬件模块（设置MAC相关过滤参数、填写传输和接收描述符初始化地址dma_addr_t、中断设置、聚合功能配置）；
+	7、PHY芯片初始化并启动；
+	8、使能NAPI模块（napi_enable）；
+	9、调用netif_start_queue或者netif_tx_start_all_queues使能传输队列调度；
+	10、调用netif_wake_queue或者netif_tx_wake_all_queues开启传输队列的调度（因为此时所有的传输环为空，可以立刻开始传输）；	
+	11、使能传输/接收通道，打开中断，开启定时器功能；
+   */
 	int			(*ndo_open)(struct net_device *dev);
+  /*1、停止上层传输调度；	
+	2、停止NAPI功能；
+	3、停止MAC接收功能；
+	4、等待既有的skb数据发出去，释放skb跟踪链表；
+	5、停止发送功能；
+	6、禁止中断功能；
+	7、手动处理已接收到的数据包传递给上层协议；
+	8、释放接受和发送描述符环内存空间；
+	9、释放接收缓存数据空间；
+	10、反注册中断函数；
+	11、删除NAPI功能（netif_napi_del）；
+	12、停止并删除timer功能、取消并删除delaywork；
+	13、关闭载波netif_carrier_off；
+	14、关闭MAC和PHY电源；
+   */
 	int			(*ndo_stop)(struct net_device *dev);
+  /*
+	1、检查skb_shinfo(skb)->tx_flags标志位，SKBTX_HW_TSTAMP指示硬件向上层软件提供硬件时间戳（调用skb_tstamp_tx  、skb_tx_timestamp），设置过程中置位SKBTX_IN_PROGRESS，表示硬件正在处理上层的时间戳提取要求；
+	2、根据ip_summed查看是否需要协助计算校验和，需要csum_start和csum_offset；
+	3、是否需要VLAN标签插入，需要vlan_proto和vlan_tci；
+	4、queue_mapping指示该SKB需要插入到哪个传输队列上；
+	5、根据nr_frags检查是否需要发送碎片包，此时需要初始化nr_frags数量的传输描述符；
+	6、检查skb->encapsulation，确定是否需要使用内层协议头；
+	7、检查skb_shinfo(skb)->gso_size是否需要硬件进行分片操作；
+	8、映射DMA操作需要的地址，填入传输描述符中；
+	9、更新传输描述环相关状态；
+	10、记录该等待传输的SKB到链表中；
+	11、如果传输环空间不够应停止上层继续调度，也可以调用BQL机制（netdev_tx_sent_queue）实现自动调度控制；
+	12、检查skb是否为jumbo帧，硬件是否支持直接发送；
+	13、检查skb->no_fcs确定是否硬件需要在帧尾部加上FCS；
+   */
+	
 	netdev_tx_t		(*ndo_start_xmit) (struct sk_buff *skb,
 						   struct net_device *dev);
+    //选择传输队列
 	u16			(*ndo_select_queue)(struct net_device *dev,
 						    struct sk_buff *skb,
 						    void *accel_priv,
 						    select_queue_fallback_t fallback);
+   //1、通知驱动程序netdev->flags标记（IFF_PROMISC、IFF_ALLMULTI、IFF_MULTICAST）已变更，
+   //由于上层协议栈对于ndo_change_rx_flags和ndo_set_rx_mode的调用并不同意，硬件的相应设置变更被放到ndo_set_rx_mode实现；
 	void			(*ndo_change_rx_flags)(struct net_device *dev,
 						       int flags);
+   /*
+	 1、根据netdev->flags标记（IFF_PROMISC、IFF_ALLMULTI、IFF_MULTICAST），设置硬件混杂模式、单播模式、多播模式使能；
+	 2、根据dev->uc设置硬件的单播地址列表，辅助函数netdev_for_each_uc_addr；
+	 3、根据dev->mc设置硬件的多播地址列表，辅助函数netdev_for_each_mc_addr；
+	 4、设置驱动私有的接收工作模式；
+	*/
 	void			(*ndo_set_rx_mode)(struct net_device *dev);
+
+	//设置网卡的MAC地址，更新dev->dev_addr，并设置相应硬件寄存器；传递参数为struct sockaddr
 	int			(*ndo_set_mac_address)(struct net_device *dev,
 						       void *addr);
+	//验证dev->dev_addr是否合法，对于ethernet网络，直接调用is_valid_ether_addr函数
 	int			(*ndo_validate_addr)(struct net_device *dev);
+
+	/* 
+  	 1、bond_dev设备相关的命令，驱动不理会；
+	 2、PHY芯片的命令操作，直接使用generic_mii_ioctl函数phy_mii_ioctl函数；
+	 3、net_bridge设备命令，驱动不理会；
+	 4、PTP命令，驱动从ifr->ifr_data取出struct hwtstamp_config，根据其参数配置硬件的PTP时间戳功能；备注：config.flags必须为0，config.tx_type为HWTSTAMP_TX_OFF系列，config.rx_filter为HWTSTAMP_FILTER_NONE系列；	
+	 5、SIOCWANDEV命令，针对WLAN设备的。。。
+   */
 	int			(*ndo_do_ioctl)(struct net_device *dev,
 					        struct ifreq *ifr, int cmd);
+	//驱动已经不再使用
 	int			(*ndo_set_config)(struct net_device *dev,
 					          struct ifmap *map);
+	//更改硬件的MTU值，注意检查硬件是否支持。。以及是否需要重新分配初始化描述符环以及接收缓存；
 	int			(*ndo_change_mtu)(struct net_device *dev,
 						  int new_mtu);
+	//设置邻居子系统struct neigh_parms参数，驱动不理会
 	int			(*ndo_neigh_setup)(struct net_device *dev,
 						   struct neigh_parms *);
+
+   /*
+	此时多半MAC以及宕机了，当然实际处理应该因人而异，不一定非得进行一次完全复位初始化操作
+	1、保存现场快照；
+	2、关闭MAC和PHY；
+	3、复位并重新初始化MAC和PHY
+   */
 	void			(*ndo_tx_timeout) (struct net_device *dev);
 
+	//拷贝硬件统计计数到用户空间，注意使用的是__u64；对于1G或者更快的网卡，64位是必须的；
 	struct rtnl_link_stats64* (*ndo_get_stats64)(struct net_device *dev,
 						     struct rtnl_link_stats64 *storage);
+
+	//拷贝硬件统计计数到用户空间，注意使用的是__u32；可以直接拷贝netdev->stats；低速网卡使用此方法；
 	struct net_device_stats* (*ndo_get_stats)(struct net_device *dev);
 
+    //如果网卡支持VLAN的VID过滤，则增加VID到过滤列表中；
 	int			(*ndo_vlan_rx_add_vid)(struct net_device *dev,
 						       __be16 proto, u16 vid);
+	
+	//如果网卡支持VLAN的VID过滤，则从过滤列表中删除对应的VID；
 	int			(*ndo_vlan_rx_kill_vid)(struct net_device *dev,
 						        __be16 proto, u16 vid);
 #ifdef CONFIG_NET_POLL_CONTROLLER
+
+    //使用查询方式代替中断方式处理网卡数据包收发事件，注意必须禁止中断，实际上直接调用中断函数，也可以直接调度NAPI去处理；
 	void                    (*ndo_poll_controller)(struct net_device *dev);
+
+	//只有虚拟网络设备在使用
 	int			(*ndo_netpoll_setup)(struct net_device *dev,
 						     struct netpoll_info *info);
+	//只有虚拟网络设备在使用
 	void			(*ndo_netpoll_cleanup)(struct net_device *dev);
 #endif
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	int			(*ndo_busy_poll)(struct napi_struct *dev);
 #endif
-	int			(*ndo_set_vf_mac)(struct net_device *dev,
+    //设置虚拟网卡的MAC地址，第二个参数是VF，第三个参数是需要设置的MAC地址指针；
+    int			(*ndo_set_vf_mac)(struct net_device *dev,
 						  int queue, u8 *mac);
+    //设置虚拟网卡的VLAN ID和User Priority，第二个参数代表虚拟功能号，第三个参数代表VLAN ID（1-4094），第四个参数代表User Priority（0-7）
 	int			(*ndo_set_vf_vlan)(struct net_device *dev,
 						   int queue, u16 vlan, u8 qos);
+    //设置虚拟网卡的传输速率，由于多个虚拟网卡共享一个物理端口，所以单个虚拟网卡的传输速率肯定小于标准值；
 	int			(*ndo_set_vf_rate)(struct net_device *dev,
 						   int vf, int min_tx_rate,
 						   int max_tx_rate);
+	//设置虚拟网卡的MAC/VLAN反欺诈过滤功能（传输通道）；
 	int			(*ndo_set_vf_spoofchk)(struct net_device *dev,
 						       int vf, bool setting);
+    //获取虚拟网卡的参数，包括虚拟功能号、mac地址、传输速率、优先级Qos、欺诈使能标记，填入struct ifla_vf_info；
 	int			(*ndo_get_vf_config)(struct net_device *dev,
 						     int vf,
 						     struct ifla_vf_info *ivf);
 	int			(*ndo_set_vf_link_state)(struct net_device *dev,
 							 int vf, int link_state);
+	//设置虚拟网卡的参数：可能包括IFLA_PORT_UNSPEC至IFLA_PORT_RESPONSE；当前只有cisco的enic驱动支持
 	int			(*ndo_set_vf_port)(struct net_device *dev,
 						   int vf,
 						   struct nlattr *port[]);
+    //返回虚拟网卡的参数，放到传递的第三个参数（skb），可以调用辅助函数nla_put；当前只有cisco的enic驱动支持				   
 	int			(*ndo_get_vf_port)(struct net_device *dev,
 						   int vf, struct sk_buff *skb);
 	int			(*ndo_set_vf_rss_query_en)(
 						   struct net_device *dev,
 						   int vf, bool setting);
+   //设置网卡的流量分类控制，如果第二个参数为0 ，则调用netdev_reset_tc关闭流量分类控制功能，
+   //相应的禁止硬件功能；如果第二个参数不为0 ，则设置netdev_set_num_tc和netdev_set_prio_tc_map
 	int			(*ndo_setup_tc)(struct net_device *dev, u8 tc);
 #if IS_ENABLED(CONFIG_FCOE)
+   //开FCOE的卸货功能（offload），更新netdev->features，调用netdev_features_change，重新分配初始化传输接收环；
 	int			(*ndo_fcoe_enable)(struct net_device *dev);
+   //关闭FCOE的卸货功能（offload），更新netdev->features，调用netdev_features_change，重新分配初始化传输接收环；
 	int			(*ndo_fcoe_disable)(struct net_device *dev);
-	int			(*ndo_fcoe_ddp_setup)(struct net_device *dev,
+    int			(*ndo_fcoe_ddp_setup)(struct net_device *dev,
 						      u16 xid,
 						      struct scatterlist *sgl,
 						      unsigned int sgc);
+   //DDP（Direct Data Placement Protocol）完成后的处理，释放资源供下次DDP请求；
 	int			(*ndo_fcoe_ddp_done)(struct net_device *dev,
 						     u16 xid);
+   //执行DDP（Direct Data Placement Protocol）相关的初始化操作，特别是struct scatterlist的DMA初始化；
 	int			(*ndo_fcoe_ddp_target)(struct net_device *dev,
 						       u16 xid,
 						       struct scatterlist *sgl,
 						       unsigned int sgc);
+   //返回硬件和驱动信息，填入struct netdev_fcoe_hbainfo；
 	int			(*ndo_fcoe_get_hbainfo)(struct net_device *dev,
 							struct netdev_fcoe_hbainfo *hbainfo);
 #endif
@@ -1100,50 +1199,65 @@ struct net_device_ops {
 #if IS_ENABLED(CONFIG_LIBFCOE)
 #define NETDEV_FCOE_WWNN 0
 #define NETDEV_FCOE_WWPN 1
+   //返回驱动自定义的wwn值，传入的参数type可能是NETDEV_FCOE_WWNN或者NETDEV_FCOE_WWPN；
 	int			(*ndo_fcoe_get_wwn)(struct net_device *dev,
 						    u64 *wwn, int type);
 #endif
 
 #ifdef CONFIG_RFS_ACCEL
+	//设置RFS硬件过滤器，关于RFS参考《Receive flow steering》；
 	int			(*ndo_rx_flow_steer)(struct net_device *dev,
 						     const struct sk_buff *skb,
 						     u16 rxq_index,
 						     u32 flow_id);
 #endif
+   //创建虚拟网卡设备，驱动几乎不用；
 	int			(*ndo_add_slave)(struct net_device *dev,
 						 struct net_device *slave_dev);
+   //删除虚拟网卡设备，驱动几乎不用；
 	int			(*ndo_del_slave)(struct net_device *dev,
 						 struct net_device *slave_dev);
+   //检查并修正传递的netdev_features_t features是否满足硬件能力要求；
 	netdev_features_t	(*ndo_fix_features)(struct net_device *dev,
 						    netdev_features_t features);
+   //更改网卡的netdev->features并设置硬件的相应能力；
 	int			(*ndo_set_features)(struct net_device *dev,
 						    netdev_features_t features);
+   //构造邻居子系统struct neighbour，驱动几乎不用；
 	int			(*ndo_neigh_construct)(struct neighbour *n);
+   //反构造邻居子系统struct neighbour，驱动几乎不用；
 	void			(*ndo_neigh_destroy)(struct neighbour *n);
 
+	//给指定地址添加FDB（forwarding database）实体；
 	int			(*ndo_fdb_add)(struct ndmsg *ndm,
 					       struct nlattr *tb[],
 					       struct net_device *dev,
 					       const unsigned char *addr,
 					       u16 flags);
+	//给指定地址删除FDB（forwarding database）实体；
 	int			(*ndo_fdb_del)(struct ndmsg *ndm,
 					       struct nlattr *tb[],
 					       struct net_device *dev,
 					       const unsigned char *addr);
+	//导出FDB实体到skb中，同时更新idx，辅助函数包括netif_addr_lock_bh、nlmsg_populate_fdb
 	int			(*ndo_fdb_dump)(struct sk_buff *skb,
 						struct netlink_callback *cb,
 						struct net_device *dev,
 						struct net_device *filter_dev,
 						int idx);
 
+	//设置网卡链路信息，从struct nlmsghdr获取设置信息；
 	int			(*ndo_bridge_setlink)(struct net_device *dev,
 						      struct nlmsghdr *nlh);
+	//返回网卡链路信息，填入skb中；
 	int			(*ndo_bridge_getlink)(struct sk_buff *skb,
 						      u32 pid, u32 seq,
 						      struct net_device *dev,
 						      u32 filter_mask);
+	//删除网卡链路信息；
 	int			(*ndo_bridge_dellink)(struct net_device *dev,
 						      struct nlmsghdr *nlh);
+    //虚拟网络设备使用，模拟网络载波的开关；
 	int			(*ndo_change_carrier)(struct net_device *dev,
 						      bool new_carrier);
 	int			(*ndo_get_phys_port_id)(struct net_device *dev,
@@ -1463,6 +1577,7 @@ enum netdev_priv_flags {
  */
 
 struct net_device {
+	/* 网卡名称，如eth0 */
 	char			name[IFNAMSIZ];
 	struct hlist_node	name_hlist;
 	char 			*ifalias;
@@ -1470,9 +1585,13 @@ struct net_device {
 	 *	I/O specific fields
 	 *	FIXME: Merge these and struct ifmap into one
 	 */
+	/* shared mem end，共享内存结束地址 */
 	unsigned long		mem_end;
+	/* shared mem start ，共享内存起始地址 */
 	unsigned long		mem_start;
+	/* device I/O address，设备内存映射到I/O内存的起始地址 */
 	unsigned long		base_addr;
+	/* device IRQ number，硬中断编号 */
 	int			irq;
 
 	/*
@@ -1480,11 +1599,18 @@ struct net_device {
 	 *	napi_list,unreg_list,close_list) but they are not
 	 *	part of the usual set specified in Space.c.
 	 */
+	 
+	/* 
+			网络队列子系统使用的一组标识
+			由__LINK_STATE_xxx标识
+	 */
 
+	/* 网卡的状态 */
 	unsigned long		state;
 
 	struct list_head	dev_list;
-	struct list_head	napi_list;
+	/* NAPI使用 */
+    struct list_head	napi_list;
 	struct list_head	unreg_list;
 	struct list_head	close_list;
 
@@ -1498,6 +1624,11 @@ struct net_device {
 		struct list_head lower;
 	} all_adj_list;
 
+    /* 
+         用于存在其他一些设备功能
+         可报告适配卡的功能，以便与CPU通信
+         使用NETIF_F_XXX标识功能特性
+     */
 	netdev_features_t	features;
 	netdev_features_t	hw_features;
 	netdev_features_t	wanted_features;
@@ -1505,12 +1636,19 @@ struct net_device {
 	netdev_features_t	hw_enc_features;
 	netdev_features_t	mpls_features;
 
+	/* Interface index. Unique device identifier. 设备ID */
+	 /* 网络设备索引号 */
 	int			ifindex;
 	int			iflink;
 
+	/* 统计变量 */
 	struct net_device_stats	stats;
 
-	atomic_long_t		rx_dropped;
+	/* dropped packets by core network.
+     * Do not use this in drivers.
+     * 被内核丢弃的数据包个数。
+     */
+    atomic_long_t		rx_dropped;
 	atomic_long_t		tx_dropped;
 
 	atomic_t		carrier_changes;
@@ -1519,34 +1657,69 @@ struct net_device {
 	const struct iw_handler_def *	wireless_handlers;
 	struct iw_public_data *	wireless_data;
 #endif
+	/* 网卡的操作函数集 */
 	const struct net_device_ops *netdev_ops;
+	/* ethtool操作接口 */
 	const struct ethtool_ops *ethtool_ops;
 	const struct forwarding_accel_ops *fwd_ops;
 
+	/* 头部一些操作，如链路层缓存，校验等 */
 	const struct header_ops *header_ops;
 
+	/* 标识接口特性，IFF_XXX，如IFF_UP */
 	unsigned int		flags;
-	unsigned int		priv_flags;
 
+	/* 
+         用于存储用户空间不可见的标识
+         由VLAN和Bridge虚拟设备使用
+     */
+    unsigned int		priv_flags;
+
+	/* 几乎不使用，为了兼容保留 */
 	unsigned short		gflags;
+	/* 结构对齐填充 */
 	unsigned short		padded;
 
+	/* 与interface group mib中的IfOperStatus相关 */
 	unsigned char		operstate;
 	unsigned char		link_mode;
 
-	unsigned char		if_port;
+	/* 
+         接口使用的端口类型
+     */
+    unsigned char		if_port;
+	/*
+         设备使用的DMA通道
+         并非所有设备都可以用DMA，有些总线不支持DMA
+     */
 	unsigned char		dma;
 
-	unsigned int		mtu;
+	/*
+         最大传输单元，标识设备能处理帧的最大尺寸 
+         Ethernet-1500
+     */
+    unsigned int		mtu;
+	
+	/*     设备所属类型
+         ARP模块中，用type判断接口的硬件地址类型
+         以太网接口为ARPHRD_ETHER 
+     */
 	unsigned short		type;
+
+	/* 
+         设备头部长度
+         Ethernet报头是ETH_HLEN=14字节
+     */
 	unsigned short		hard_header_len;
 
 	unsigned short		needed_headroom;
 	unsigned short		needed_tailroom;
 
 	/* Interface address info. */
+    /* 硬件地址，通常在初始化过程中从硬件读取 */
 	unsigned char		perm_addr[MAX_ADDR_LEN];
 	unsigned char		addr_assign_type;
+	/* 硬件地址长度 */
 	unsigned char		addr_len;
 	unsigned short		neigh_priv_len;
 	unsigned short          dev_id;
@@ -1563,12 +1736,14 @@ struct net_device {
 	unsigned char		name_assign_type;
 
 	bool			uc_promisc;
+	/* 混杂模式 */
 	unsigned int		promiscuity;
+	/* 非零值时，设备监听所有多播地址 */
 	unsigned int		allmulti;
 
 
 	/* Protocol specific pointers */
-
+	/* 特定协议的指针 */
 #if IS_ENABLED(CONFIG_VLAN_8021Q)
 	struct vlan_info __rcu	*vlan_info;
 #endif
@@ -1579,6 +1754,8 @@ struct net_device {
 	struct tipc_bearer __rcu *tipc_ptr;
 #endif
 	void 			*atalk_ptr;
+
+	/* ip指向in_device结构 */
 	struct in_device __rcu	*ip_ptr;
 	struct dn_dev __rcu     *dn_ptr;
 	struct inet6_dev __rcu	*ip6_ptr;
@@ -1606,6 +1783,7 @@ struct net_device {
 	void __rcu		*rx_handler_data;
 
 	struct netdev_queue __rcu *ingress_queue;
+	/* 链路层广播地址 */
 	unsigned char		broadcast[MAX_ADDR_LEN];
 
 
@@ -1615,8 +1793,12 @@ struct net_device {
 	struct netdev_queue	*_tx ____cacheline_aligned_in_smp;
 	unsigned int		num_tx_queues;
 	unsigned int		real_num_tx_queues;
+	/* 排队规则 */
 	struct Qdisc		*qdisc;
-	unsigned long		tx_queue_len;
+	/* 
+       可在设备发送队列中排队的最大数据包数
+     */
+    unsigned long		tx_queue_len;
 	spinlock_t		tx_global_lock;
 
 #ifdef CONFIG_XPS
@@ -1633,16 +1815,27 @@ struct net_device {
 	 * please use netdev_queue->trans_start instead.
 	 */
 	unsigned long		trans_start;
-
+	 
+	 /*	  
+	      网络层确定传输超时，
+	 	  调用驱动程序tx_timeout接口的最短时间 
+	 */
 	int			watchdog_timeo;
+    /* watchdog定时器 */
 	struct timer_list	watchdog_timer;
 
+	/* 引用计数 */
 	int __percpu		*pcpu_refcnt;
-	struct list_head	todo_list;
+	/*     网络设备的注册和除名以两步进行，
+         该字段用于处理第二步
+     */
+    struct list_head	todo_list;
 
+	/* 接口索引hash */
 	struct hlist_node	index_hlist;
 	struct list_head	link_watch_list;
 
+	/* 设备的注册状态 */
 	enum { NETREG_UNINITIALIZED=0,
 	       NETREG_REGISTERED,	/* completed register_netdevice */
 	       NETREG_UNREGISTERING,	/* called unregister_netdevice */

@@ -190,6 +190,14 @@ out:
  *		allocations in case the data is required for writeback
  *	@node: numa node to allocate memory on
  *
+ *	参数：
+ *	size：skb的数据大小
+ *	gfp_mask：不用解释
+ *	fclone：表示从哪个cache中分配
+ *      当fclone为1时，从skbuff_fclone_cache上分配
+ *       当fclone为0时，从skbuff_head_cache上分配
+ *	node: NUMA节点
+ *
  *	Allocate a new &sk_buff. The returned buffer has no headroom and a
  *	tail room of at least size bytes. The object has a reference count
  *	of one. The return is the buffer. On a failure the return is %NULL.
@@ -207,13 +215,13 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	bool pfmemalloc;
 
 	cache = (flags & SKB_ALLOC_FCLONE)
-		? skbuff_fclone_cache : skbuff_head_cache;
+		? skbuff_fclone_cache : skbuff_head_cache; 
 
 	if (sk_memalloc_socks() && (flags & SKB_ALLOC_RX))
 		gfp_mask |= __GFP_MEMALLOC;
 
 	/* Get the HEAD */
-	skb = kmem_cache_alloc_node(cache, gfp_mask & ~__GFP_DMA, node);
+	skb = kmem_cache_alloc_node(cache, gfp_mask & ~__GFP_DMA, node);// 得到skb，注意这里没有包含数据，仅仅是skb_buff这个结构体
 	if (!skb)
 		goto out;
 	prefetchw(skb);
@@ -222,15 +230,20 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	 * line. It usually works because kmalloc(X > SMP_CACHE_BYTES) gives
 	 * aligned memory blocks, unless SLUB/SLAB debug is enabled.
 	 * Both skb->head and skb_shared_info are cache line aligned.
+	 *我们尽力在单独的缓存行上对齐skb_._info。它通常工作，因为kmalloc(X>SMP_CACHE_BYTES)给出对齐的存储器块，
+	 *除非启用了SLUB/SLAB调试。
+	 *skb->head和skb_._info都是缓存行对齐的。 
 	 */
-	size = SKB_DATA_ALIGN(size);
+	size = SKB_DATA_ALIGN(size); // 获得线性数据分片长度（注意对齐）
 	size += SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
-	data = kmalloc_reserve(size, gfp_mask, node, &pfmemalloc);
+	data = kmalloc_reserve(size, gfp_mask, node, &pfmemalloc);// 注意分配的是什么，是size + skb_shared_info！！！！！
 	if (!data)
 		goto nodata;
 	/* kmalloc(size) might give us more room than requested.
 	 * Put skb_shared_info exactly at the end of allocated zone,
 	 * to allow max possible filling before reallocation.
+	 * kmalloc(size) 可能给我们的空间比要求的要大。
+	 *将skb_._info准确地放在分配区域的末尾，以便在重新分配之前允许最大可能的填充。
 	 */
 	size = SKB_WITH_OVERHEAD(ksize(data));
 	prefetchw(data + size);
@@ -239,16 +252,18 @@ struct sk_buff *__alloc_skb(unsigned int size, gfp_t gfp_mask,
 	 * Only clear those fields we need to clear, not those that we will
 	 * actually initialise below. Hence, don't put any more fields after
 	 * the tail pointer in struct sk_buff!
+	 *只有清除那些我们需要清除的字段，而不是那些我们将在下面实际初始化的字段。
+	 *因此，不要在struct sk_buff中的尾指针后面再放字段！
 	 */
-	memset(skb, 0, offsetof(struct sk_buff, tail));
+	memset(skb, 0, offsetof(struct sk_buff, tail)); // 初始化
 	/* Account for allocated memory : skb + skb->head */
-	skb->truesize = SKB_TRUESIZE(size);
+	skb->truesize = SKB_TRUESIZE(size);// 实际大小等于sk_buff + size，刚刚开始还没有非线性数据
 	skb->pfmemalloc = pfmemalloc;
 	atomic_set(&skb->users, 1);
 	skb->head = data;
 	skb->data = data;
 	skb_reset_tail_pointer(skb);
-	skb->end = skb->tail + size;
+	skb->end = skb->tail + size;//这是一开始的时候分配的空间，其中skb的head data tail都指向线性数据的头部
 	skb->mac_header = (typeof(skb->mac_header))~0U;
 	skb->transport_header = (typeof(skb->transport_header))~0U;
 
@@ -641,6 +656,12 @@ EXPORT_SYMBOL(__kfree_skb);
  */
 void kfree_skb(struct sk_buff *skb)
 {
+	//简单从表面上看if(likely(value)) == if(value)，if(unlikely(value)) == if(value)
+	//likely和unlikely是一样的，但是实际上执行是不同的，
+	//加likely的意思是value的值为真的可能性更大一些，那么执行if的机会大，
+	//而unlikely表示value的值为假的可能性大一些，执行else机会大一些。
+	//加上这种修饰，编译成二进制代码时likely使得if后面的执行语句紧跟着前面的程序，
+	//unlikely使得else后面的语句紧跟着前面的程序，这样就会被cache预读取，增加程序的执行速度
 	if (unlikely(!skb))
 		return;
 	if (likely(atomic_read(&skb->users) == 1))
@@ -1309,9 +1330,9 @@ unsigned char *skb_put(struct sk_buff *skb, unsigned int len)
 {
 	unsigned char *tmp = skb_tail_pointer(skb);
 	SKB_LINEAR_ASSERT(skb);
-	skb->tail += len;
-	skb->len  += len;
-	if (unlikely(skb->tail > skb->end))
+	skb->tail += len;  // 移动指针
+	skb->len  += len;  // 数据空间增大len
+	if (unlikely(skb->tail > skb->end))  // 如果tail指针超过end指针了，那么处理错误~
 		skb_over_panic(skb, len, __builtin_return_address(0));
 	return tmp;
 }
@@ -1328,10 +1349,10 @@ EXPORT_SYMBOL(skb_put);
  */
 unsigned char *skb_push(struct sk_buff *skb, unsigned int len)
 {
-	skb->data -= len;
-	skb->len  += len;
+	skb->data -= len;// 向上移动指针
+	skb->len  += len;// 数据长度增加
 	if (unlikely(skb->data<skb->head))
-		skb_under_panic(skb, len, __builtin_return_address(0));
+		skb_under_panic(skb, len, __builtin_return_address(0));// data指针超过head那么就是处理错误~
 	return skb->data;
 }
 EXPORT_SYMBOL(skb_push);
@@ -3998,66 +4019,86 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 
 	*fragstolen = false;
 
+	 /* 不能为克隆 */
 	if (skb_cloned(to))
 		return false;
 
+	/* to尾部能够容纳得下新数据 */
 	if (len <= skb_tailroom(to)) {
+		/* from拷贝到to尾部 */
 		if (len)
 			BUG_ON(skb_copy_bits(from, 0, skb_put(to, len), len));
 		*delta_truesize = 0;
 		return true;
 	}
 
-	if (skb_has_frag_list(to) || skb_has_frag_list(from))
+	 /* to或者from有分片 */
+	 if (skb_has_frag_list(to) || skb_has_frag_list(from))
 		return false;
 
+	/* 线性缓冲区数据长度不为0 */
 	if (skb_headlen(from) != 0) {
 		struct page *page;
 		unsigned int offset;
 
+		/* 达到最大frags限制 */
 		if (skb_shinfo(to)->nr_frags +
 		    skb_shinfo(from)->nr_frags >= MAX_SKB_FRAGS)
 			return false;
 
+		/* skb被锁定 */
 		if (skb_head_is_locked(from))
 			return false;
 
+		/* 计算数据增量，去掉头部 */
 		delta = from->truesize - SKB_DATA_ALIGN(sizeof(struct sk_buff));
 
+		/* 找到对应的页和偏移 */
 		page = virt_to_head_page(from->head);
 		offset = from->data - (unsigned char *)page_address(page);
 
+		/* 根据from的页和偏移在to的frags上增加一个frag */
 		skb_fill_page_desc(to, skb_shinfo(to)->nr_frags,
 				   page, offset, skb_headlen(from));
 		*fragstolen = true;
 	} else {
+		/* 达到最大frags限制 */
 		if (skb_shinfo(to)->nr_frags +
 		    skb_shinfo(from)->nr_frags > MAX_SKB_FRAGS)
 			return false;
 
+		/* 计算增量，减掉所有头部和无数据线性区域 */
 		delta = from->truesize - SKB_TRUESIZE(skb_end_offset(from));
 	}
 
 	WARN_ON_ONCE(delta < len);
 
+	/* 拷贝frags */
 	memcpy(skb_shinfo(to)->frags + skb_shinfo(to)->nr_frags,
 	       skb_shinfo(from)->frags,
 	       skb_shinfo(from)->nr_frags * sizeof(skb_frag_t));
+	/* 增加frags数量 */
 	skb_shinfo(to)->nr_frags += skb_shinfo(from)->nr_frags;
 
+	/* 不是克隆的，设置from的frags为0 */
 	if (!skb_cloned(from))
 		skb_shinfo(from)->nr_frags = 0;
 
 	/* if the skb is not cloned this does nothing
 	 * since we set nr_frags to 0.
 	 */
+	/* 克隆的，则需要对frags增加引用 */
 	for (i = 0; i < skb_shinfo(from)->nr_frags; i++)
 		skb_frag_ref(from, i);
 
+	/* 总长度加上增量 */
 	to->truesize += delta;
+	/* 总数据长度增加 */
 	to->len += len;
+	/* 非线性数据长度增加 */
 	to->data_len += len;
 
+	/* 记录增量 */
 	*delta_truesize = delta;
 	return true;
 }

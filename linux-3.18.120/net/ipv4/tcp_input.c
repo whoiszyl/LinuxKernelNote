@@ -4146,20 +4146,25 @@ static bool tcp_try_coalesce(struct sock *sk,
 	*fragstolen = false;
 
 	/* Its possible this segment overlaps with prior segment in queue */
+	/* 检测序号是否能够对应上 */
 	if (TCP_SKB_CB(from)->seq != TCP_SKB_CB(to)->end_seq)
 		return false;
 
+	/* 尝试合并到前一个数据段 */
 	if (!skb_try_coalesce(to, from, fragstolen, &delta))
 		return false;
 
+	/* 调整内存使用 */
 	atomic_add(delta, &sk->sk_rmem_alloc);
 	sk_mem_charge(sk, delta);
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPRCVCOALESCE);
+	/* 更新cb相关字段 */
 	TCP_SKB_CB(to)->end_seq = TCP_SKB_CB(from)->end_seq;
 	TCP_SKB_CB(to)->ack_seq = TCP_SKB_CB(from)->ack_seq;
 	TCP_SKB_CB(to)->tcp_flags |= TCP_SKB_CB(from)->tcp_flags;
 	return true;
 }
+
 
 /* This one checks to see if we can put data from the
  * out_of_order queue into the receive_queue.
@@ -4357,18 +4362,25 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 		  bool *fragstolen)
 {
 	int eaten;
+	/* 取队尾 */
 	struct sk_buff *tail = skb_peek_tail(&sk->sk_receive_queue);
 
 	__skb_pull(skb, hdrlen);
+	/* 尝试进行分段合并 */
 	eaten = (tail &&
 		 tcp_try_coalesce(sk, tail, skb, fragstolen)) ? 1 : 0;
+	/* 更新下一个期望接收的序号 */
 	tcp_sk(sk)->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+	/* 未合并 */
 	if (!eaten) {
+		/* 添加到队列尾部 */
 		__skb_queue_tail(&sk->sk_receive_queue, skb);
+		/* 关联控制块 */
 		skb_set_owner_r(skb, sk);
 	}
 	return eaten;
 }
+
 
 int tcp_send_rcvq(struct sock *sk, struct msghdr *msg, size_t size)
 {
@@ -5118,11 +5130,13 @@ discard:
  *	the rest is checked inline. Fast processing is turned on in
  *	tcp_data_queue when everything is OK.
  */
+ /*处理过程根据首部预测字段分为快速路径和慢速路径*/
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 			 const struct tcphdr *th, unsigned int len)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 路由为空，则重新设置路由 */
 	if (unlikely(sk->sk_rx_dst == NULL))
 		inet_csk(sk)->icsk_af_ops->sk_rx_dst_set(sk, skb);
 	/*
@@ -5151,9 +5165,11 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 	 *	PSH flag is ignored.
 	 */
 
+	/* 快路检查&& 序号正确 && ack序号正确 */
 	if ((tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags &&
 	    TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
 	    !after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)) {
+		/* tcp头部长度 */
 		int tcp_header_len = tp->tcp_header_len;
 
 		/* Timestamp header prediction: tcp_header_len
@@ -5162,12 +5178,15 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 		 */
 
 		/* Check timestamp */
+		 /* 有时间戳选项 */
 		if (tcp_header_len == sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) {
 			/* No? Slow path! */
+			/* 解析时间戳选项失败，执行慢路 */
 			if (!tcp_parse_aligned_timestamp(tp, th))
 				goto slow_path;
 
 			/* If PAWS failed, check it more carefully in slow path */
+			/* 序号回转，执行慢路 */
 			if ((s32)(tp->rx_opt.rcv_tsval - tp->rx_opt.ts_recent) < 0)
 				goto slow_path;
 
@@ -5178,6 +5197,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 			 */
 		}
 
+		/* 无数据 */
 		if (len <= tcp_header_len) {
 			/* Bulk data transfer: sender */
 			if (len == tcp_header_len) {
@@ -5185,6 +5205,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 				 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
 				 * Hence, check seq<=rcv_wup reduces to:
 				 */
+				 /* 有时间戳选项&& 所有接收的数据段均确认完毕保存时间戳*/
 				if (tcp_header_len ==
 				    (sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
 				    tp->rcv_nxt == tp->rcv_wup)
@@ -5195,45 +5216,60 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 				 */
 				tcp_ack(sk, skb, 0);
 				__kfree_skb(skb);
+				/* 检查是否有数据要发送，并检查发送缓冲区大小 */
 				tcp_data_snd_check(sk);
 				return;
 			} else { /* Header too small */
+				/* 数据比头部都小，错包 */
 				TCP_INC_STATS_BH(sock_net(sk), TCP_MIB_INERRS);
 				goto discard;
 			}
 		} else {
+		/* 有数据 */
 			int eaten = 0;
 			bool fragstolen = false;
 
+			/* 读取进程上下文 */
 			if (tp->ucopy.task == current &&
+				/* 期待读取的和期待接收的序号一致 */
 			    tp->copied_seq == tp->rcv_nxt &&
+			    /* 数据<= 待读取长度 */
 			    len - tcp_header_len <= tp->ucopy.len &&
+			    /* 控制块被用户空间锁定 */
 			    sock_owned_by_user(sk)) {
+			     /* 设置状态为running */
 				__set_current_state(TASK_RUNNING);
 
+				/* 拷贝数据到msghdr */
 				if (!tcp_copy_to_iovec(sk, skb, tcp_header_len)) {
 					/* Predicted packet is in window by definition.
 					 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
 					 * Hence, check seq<=rcv_wup reduces to:
 					 */
+					/* 有时间戳选项&& 收到的数据段均已确认，更新时间戳 */
 					if (tcp_header_len ==
 					    (sizeof(struct tcphdr) +
 					     TCPOLEN_TSTAMP_ALIGNED) &&
 					    tp->rcv_nxt == tp->rcv_wup)
 						tcp_store_ts_recent(tp);
 
+					 /* 接收端RTT估算 */
 					tcp_rcv_rtt_measure_ts(sk, skb);
 
 					__skb_pull(skb, tcp_header_len);
+					/* 更新期望接收的序号 */
 					tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
 					NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPHPHITSTOUSER);
 					eaten = 1;
 				}
 			}
+			/* 未拷贝数据到用户空间，或者拷贝失败 */
 			if (!eaten) {
+				/* 检查校验和 */
 				if (tcp_checksum_complete_user(sk, skb))
 					goto csum_error;
 
+				 /* skb长度> 预分配长度 */
 				if ((int)skb->truesize > sk->sk_forward_alloc)
 					goto step5;
 
@@ -5241,34 +5277,44 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 				 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
 				 * Hence, check seq<=rcv_wup reduces to:
 				 */
+				/* 有时间戳选项，且数据均已确认完毕，则更新时间戳 */
 				if (tcp_header_len ==
 				    (sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
 				    tp->rcv_nxt == tp->rcv_wup)
 					tcp_store_ts_recent(tp);
 
+				/* 计算RTT */
 				tcp_rcv_rtt_measure_ts(sk, skb);
 
 				NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPHPHITS);
 
 				/* Bulk data transfer: receiver */
+				/* 数据加入接收队列 */
 				eaten = tcp_queue_rcv(sk, skb, tcp_header_len,
 						      &fragstolen);
 			}
 
 			tcp_event_data_recv(sk, skb);
 
+			/* 确认序号确认了数据 */
 			if (TCP_SKB_CB(skb)->ack_seq != tp->snd_una) {
 				/* Well, only one small jumplet in fast path... */
+				 /* 处理ack */
 				tcp_ack(sk, skb, FLAG_DATA);
+				 /* 检查是否有数据要发送，需要则发送 */
 				tcp_data_snd_check(sk);
+				/* 没有ack要发送 */
 				if (!inet_csk_ack_scheduled(sk))
 					goto no_ack;
 			}
 
+			 /* 检查是否有ack要发送，需要则发送 */
 			__tcp_ack_snd_check(sk, 0);
 no_ack:
+			 /* skb已经复制到用户空间，则释放之 */
 			if (eaten)
 				kfree_skb_partial(skb, fragstolen);
+			/* 唤醒用户进程有数据读取 */
 			sk->sk_data_ready(sk);
 			return;
 		}

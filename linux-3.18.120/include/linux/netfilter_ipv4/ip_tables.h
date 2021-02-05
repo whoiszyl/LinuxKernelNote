@@ -6,7 +6,8 @@
 
 /*
  * 	Format of an IP firewall descriptor
- *
+ *  注意这里的说明：IP地址和掩码是按照网络字节存储（大端存储）标志字节和端口号是按
+ *  照主机字节序存储（依主机硬件结构而定）
  * 	src, dst, src_mask, dst_mask are always stored in network byte order.
  * 	flags are stored in host byte order (of course).
  * 	Port numbers are stored in HOST byte order.

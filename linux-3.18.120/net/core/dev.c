@@ -221,11 +221,16 @@ static void list_netdevice(struct net_device *dev)
 
 	ASSERT_RTNL();
 
+	//获取写锁
 	write_lock_bh(&dev_base_lock);
+	//将新设别添加到dev_base_head的末尾
 	list_add_tail_rcu(&dev->dev_list, &net->dev_base_head);
+	//加入到dev_name_list
 	hlist_add_head_rcu(&dev->name_hlist, dev_name_hash(net, dev->name));
+	//加入到dev_index_list
 	hlist_add_head_rcu(&dev->index_hlist,
 			   dev_index_hash(net, dev->ifindex));
+	//操作完成，释放写锁
 	write_unlock_bh(&dev_base_lock);
 
 	dev_base_seq_inc(net);
@@ -239,6 +244,8 @@ static void unlist_netdevice(struct net_device *dev)
 	ASSERT_RTNL();
 
 	/* Unlink dev from the device chain */
+	
+	//过程是list_netdevice()的逆操作
 	write_lock_bh(&dev_base_lock);
 	list_del_rcu(&dev->dev_list);
 	hlist_del_rcu(&dev->name_hlist);
@@ -722,6 +729,7 @@ struct net_device *dev_get_by_name(struct net *net, const char *name)
 {
 	struct net_device *dev;
 
+	//操作类似dev_get_by_index()
 	rcu_read_lock();
 	dev = dev_get_by_name_rcu(net, name);
 	if (dev)
@@ -796,10 +804,14 @@ struct net_device *dev_get_by_index(struct net *net, int ifindex)
 {
 	struct net_device *dev;
 
+	//持有读锁
 	rcu_read_lock();
+	//查找dev_index_head表查询
 	dev = dev_get_by_index_rcu(net, ifindex);
+	//找到指定设备，这里会增加对该设备的引用计数
 	if (dev)
 		dev_hold(dev);
+	//释放读锁
 	rcu_read_unlock();
 	return dev;
 }

@@ -7,13 +7,19 @@
 
 
 /* Responses from hook functions. */
-#define NF_DROP 0
-#define NF_ACCEPT 1
-#define NF_STOLEN 2
-#define NF_QUEUE 3
-#define NF_REPEAT 4
-#define NF_STOP 5
-#define NF_MAX_VERDICT NF_STOP
+#define NF_DROP 0  				//丢弃该数据包
+#define NF_ACCEPT 1				//保留该数据包 这个返回值告诉 Netfilter：到目前为止,该数据包还是
+								//被接受的并且该数据包应当被递交到网络协议栈的下一个阶段。
+#define NF_STOLEN 2				//忘掉该数据包 该回调函数将从此开始对数据包的处理，并且Netfilter
+								//应当放弃对该数据包做任何的处理。但是，这并不意味着该数据包的资源
+								//已经被释放。这个数据包以及它独自的sk_buff数据结构仍然有效，只是
+								//回调函数从Netfilter 获取了该数据包的所有权。
+#define NF_QUEUE 3 				//将该数据包插入到用户空间 对该数据报进行排队(通常用于将数据报给用户空间的进程进行处理)
+#define NF_REPEAT 4 			//再次调用该hook函数 应当谨慎使用这个值，以免造成死循环。
+#define NF_STOP 5 				//一旦挂接链表中某个hook节点返回NF_STOP,
+								//该skb包就立即结束检查而接收,不再进入链表中后续的hook节点,
+								//而NF_ACCEPT则还需要进入后续hook点检查。
+#define NF_MAX_VERDICT NF_STOP  //
 
 /* we overload the higher bits for encoding auxiliary data such as the queue
  * number or errno values. Not nice, but better than additional function

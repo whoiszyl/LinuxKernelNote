@@ -347,9 +347,12 @@ static inline struct sock *__inet_lookup(struct net *net,
 					 const int dif)
 {
 	u16 hnum = ntohs(dport);
+	/*,首先是在established状态的socket中查找,处于established状态,说明3次握手已经完成,
+	因此这个socket可以通过简单的4元组hash在hashinfo的ehash中查找*/
 	struct sock *sk = __inet_lookup_established(net, hashinfo,
 				saddr, sport, daddr, hnum, dif);
-
+	/*而当在__inet_lookup_established中没有找到时,则将会__inet_lookup_listener中查找.
+	也就是在处于listening状态的socket中查找(这里主要是通过daddr也就是目的地址来进行匹配). */
 	return sk ? : __inet_lookup_listener(net, hashinfo, saddr, sport,
 					     daddr, hnum, dif);
 }

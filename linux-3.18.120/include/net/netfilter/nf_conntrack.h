@@ -80,19 +80,28 @@ struct nf_conn {
 	 * Helper nf_ct_put() equals nf_conntrack_put() by dec refcnt,
 	 * beware nf_ct_get() is different and don't inc refcnt.
 	 */
+	 
+	/* 连接跟踪的引用计数 */
 	struct nf_conntrack ct_general;
 
-	spinlock_t	lock;
+	spinlock_t	lock;//自旋锁
 	u16		cpu;
 
 	/* XXX should I move this to the tail ? - Y.K */
+	/* Connection tracking(链接跟踪)用来跟踪、记录每个链接的信息(目前仅支持IP协议的连接跟踪)。
+	每个链接由“tuple”来唯一标识，这里的“tuple”对不同的协议会有不同的含义，例如对tcp,udp
+		  来说就是五元组: (源IP，源端口，目的IP, 目的端口，协议号)，对ICMP协议来说是: (源IP, 目
+	的IP, id, type, code), 其中id,type与code都是icmp协议的信息。链接跟踪是防火墙实现状态检
+	测的基础，很多功能都需要借助链接跟踪才能实现，例如NAT、快速转发、等等。*/
 	/* These are my tuples; original and reply */
 	struct nf_conntrack_tuple_hash tuplehash[IP_CT_DIR_MAX];
 
 	/* Have we seen traffic both ways yet? (bitset) */
+	/* 可以设置由enum ip_conntrack_status中描述的状态 */
 	unsigned long status;
 
 	/* If we were expected by an expectation, this will be it */
+	/* 如果该连接是某个连接的子连接，则master指向它的主连接 */
 	struct nf_conn *master;
 
 	/* Timer function; drops refcnt when it goes off. */
@@ -107,12 +116,14 @@ struct nf_conn {
 #endif
 
 	/* Extensions */
+	/* 用于扩展结构 */
 	struct nf_ct_ext *ext;
 #ifdef CONFIG_NET_NS
 	struct net *ct_net;
 #endif
 
 	/* Storage reserved for other modules, must be the last member */
+	/* 用于保存不同协议的私有数据 */
 	union nf_conntrack_proto proto;
 };
 

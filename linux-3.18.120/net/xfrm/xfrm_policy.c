@@ -59,10 +59,13 @@ static struct xfrm_policy *__xfrm_policy_unlink(struct xfrm_policy *pol,
 						int dir);
 
 static inline bool
+
+//IPV4协议族选择子比较
 __xfrm4_selector_match(const struct xfrm_selector *sel, const struct flowi *fl)
 {
 	const struct flowi4 *fl4 = &fl->u.ip4;
-
+	
+	// 比较V4目的地址, V4源地址, 目的端口, 源端口, 协议, 网卡索引号
 	return  addr4_match(fl4->daddr, sel->daddr.a4, sel->prefixlen_d) &&
 		addr4_match(fl4->saddr, sel->saddr.a4, sel->prefixlen_s) &&
 		!((xfrm_flowi_dport(fl, &fl4->uli) ^ sel->dport) & sel->dport_mask) &&
@@ -72,10 +75,13 @@ __xfrm4_selector_match(const struct xfrm_selector *sel, const struct flowi *fl)
 }
 
 static inline bool
+
+	//IPV6协议族选择子比较
 __xfrm6_selector_match(const struct xfrm_selector *sel, const struct flowi *fl)
 {
 	const struct flowi6 *fl6 = &fl->u.ip6;
 
+	// 比较V6目的地址, V6源地址, 目的端口, 源端口, 协议, 网卡索引号
 	return  addr_match(&fl6->daddr, &sel->daddr, sel->prefixlen_d) &&
 		addr_match(&fl6->saddr, &sel->saddr, sel->prefixlen_s) &&
 		!((xfrm_flowi_dport(fl, &fl6->uli) ^ sel->dport) & sel->dport_mask) &&
@@ -84,6 +90,7 @@ __xfrm6_selector_match(const struct xfrm_selector *sel, const struct flowi *fl)
 		(fl6->flowi6_oif == sel->ifindex || !sel->ifindex);
 }
 
+// 选择子匹配,分别对IPV4和IPV6协议族比较
 bool xfrm_selector_match(const struct xfrm_selector *sel, const struct flowi *fl,
 			 unsigned short family)
 {
@@ -103,12 +110,15 @@ static struct xfrm_policy_afinfo *xfrm_policy_get_afinfo(unsigned short family)
 	if (unlikely(family >= NPROTO))
 		return NULL;
 	rcu_read_lock();
+	// 获取指定协议位置处的协议信息结构
 	afinfo = rcu_dereference(xfrm_policy_afinfo[family]);
+	// 如果该协议信息结构不存在, 解锁
 	if (unlikely(!afinfo))
 		rcu_read_unlock();
 	return afinfo;
 }
 
+// 释放协议信息结构, 解读锁
 static void xfrm_policy_put_afinfo(struct xfrm_policy_afinfo *afinfo)
 {
 	rcu_read_unlock();
@@ -172,6 +182,7 @@ static inline unsigned long make_jiffies(long secs)
 		return secs*HZ;
 }
 
+//定时器函数:
 static void xfrm_policy_timer(unsigned long data)
 {
 	struct xfrm_policy *xp = (struct xfrm_policy *)data;
@@ -181,31 +192,41 @@ static void xfrm_policy_timer(unsigned long data)
 	int dir;
 
 	read_lock(&xp->lock);
-
+	
+	// 如果策略已经是死的, 退出
 	if (unlikely(xp->walk.dead))
 		goto out;
-
+	
+	// 根据策略索引号确定策略处理的数据的方向, 看索引号的后3位
 	dir = xfrm_policy_id2dir(xp->index);
-
+	// 如果到期了还要强制要增加一些时间
 	if (xp->lft.hard_add_expires_seconds) {
+		// 计算强制增加的超时时间
 		long tmo = xp->lft.hard_add_expires_seconds +
 			xp->curlft.add_time - now;
+		// 没法增加超时了, 到期
 		if (tmo <= 0)
 			goto expired;
 		if (tmo < next)
 			next = tmo;
 	}
+	// 如果到期了还要强制要增加的使用时间
 	if (xp->lft.hard_use_expires_seconds) {
+		// 计算强制增加的使用时间
 		long tmo = xp->lft.hard_use_expires_seconds +
 			(xp->curlft.use_time ? : xp->curlft.add_time) - now;
+		// 没法增加超时了, 到期
 		if (tmo <= 0)
-			goto expired;
+		goto expired;
 		if (tmo < next)
 			next = tmo;
 	}
+	// 如果到期了还要软性要增加一些时间
 	if (xp->lft.soft_add_expires_seconds) {
+		// 计算软性增加的时间
 		long tmo = xp->lft.soft_add_expires_seconds +
 			xp->curlft.add_time - now;
+		// 软性增加超时小于0, 设置报警标志, 并将超时设置为XFRM_KM_TIMEOUT, 这点和其他不同
 		if (tmo <= 0) {
 			warn = 1;
 			tmo = XFRM_KM_TIMEOUT;
@@ -213,9 +234,12 @@ static void xfrm_policy_timer(unsigned long data)
 		if (tmo < next)
 			next = tmo;
 	}
+	// 如果到期了还要软性要增加的使用时间
 	if (xp->lft.soft_use_expires_seconds) {
+		// 计算软性增加的使用时间
 		long tmo = xp->lft.soft_use_expires_seconds +
 			(xp->curlft.use_time ? : xp->curlft.add_time) - now;
+		// 软性增加超时小于0, 设置报警标志, 并将超时设置为XFRM_KM_TIMEOUT, 这点和其他不同
 		if (tmo <= 0) {
 			warn = 1;
 			tmo = XFRM_KM_TIMEOUT;
@@ -223,9 +247,11 @@ static void xfrm_policy_timer(unsigned long data)
 		if (tmo < next)
 			next = tmo;
 	}
-
+	
+	// 需要报警, 调用到期回调
 	if (warn)
 		km_policy_expired(xp, dir, 0, 0);
+	// 如果更新的超时值有效, 修改定时器超时, 增加策略使用计数
 	if (next != LONG_MAX &&
 	    !mod_timer(&xp->timer, jiffies + make_jiffies(next)))
 		xfrm_pol_hold(xp);
@@ -237,7 +263,9 @@ out:
 
 expired:
 	read_unlock(&xp->lock);
+	// 如果确实到期, 删除策略
 	if (!xfrm_policy_delete(xp, dir))
+		// 1表示是硬性到期了
 		km_policy_expired(xp, dir, 1, 0);
 	xfrm_pol_put(xp);
 }
@@ -279,17 +307,22 @@ static const struct flow_cache_ops xfrm_policy_fc_ops = {
 struct xfrm_policy *xfrm_policy_alloc(struct net *net, gfp_t gfp)
 {
 	struct xfrm_policy *policy;
-
+	
+	// 分配struct xfrm_policy结构空间并清零
 	policy = kzalloc(sizeof(struct xfrm_policy), gfp);
 
 	if (policy) {
 		write_pnet(&policy->xp_net, net);
 		INIT_LIST_HEAD(&policy->walk.all);
+		// 初始化链接节点
 		INIT_HLIST_NODE(&policy->bydst);
 		INIT_HLIST_NODE(&policy->byidx);
+		// 初始化锁
 		rwlock_init(&policy->lock);
+		// 策略引用计数初始化为1
 		atomic_set(&policy->refcnt, 1);
 		skb_queue_head_init(&policy->polq.hold_queue);
+		// 初始化定时器
 		setup_timer(&policy->timer, xfrm_policy_timer,
 				(unsigned long)policy);
 		setup_timer(&policy->polq.hold_timer, xfrm_policy_queue_process,
@@ -326,6 +359,7 @@ static void xfrm_queue_purge(struct sk_buff_head *list)
  * entry dead. The rule must be unlinked from lists to the moment.
  */
 
+// 策略释放到垃圾链表
 static void xfrm_policy_kill(struct xfrm_policy *policy)
 {
 	policy->walk.dead = 1;
@@ -461,31 +495,42 @@ static unsigned long xfrm_new_hash_mask(unsigned int old_hmask)
 	return ((old_hmask + 1) << 1) - 1;
 }
 
+// 更改按目的地址HASH的HASH链表大小
 static void xfrm_bydst_resize(struct net *net, int dir)
 {
+	// 该方向的HASH表掩码(最大值, 一般是2^N-1)
 	unsigned int hmask = net->xfrm.policy_bydst[dir].hmask;
+	// 新HASH表掩码(2^(N+1)-1)
 	unsigned int nhashmask = xfrm_new_hash_mask(hmask);
+	// 新HASH表大小
 	unsigned int nsize = (nhashmask + 1) * sizeof(struct hlist_head);
+	// 老HAHS表
 	struct hlist_head *odst = net->xfrm.policy_bydst[dir].table;
+	// 新HASH表
 	struct hlist_head *ndst = xfrm_hash_alloc(nsize);
 	int i;
 
+	// 新HASH表空间分配不出来, 返回
 	if (!ndst)
 		return;
 
 	write_lock_bh(&net->xfrm.xfrm_policy_lock);
 
+	// 将所有策略节点转到新HASH表
 	for (i = hmask; i >= 0; i--)
 		xfrm_dst_hash_transfer(net, odst + i, ndst, nhashmask, dir);
 
+	// 将全局变量值更新为新HASH表参数
 	net->xfrm.policy_bydst[dir].table = ndst;
 	net->xfrm.policy_bydst[dir].hmask = nhashmask;
 
 	write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 
+	// 释放老HASH表参数
 	xfrm_hash_free(odst, (hmask + 1) * sizeof(struct hlist_head));
 }
 
+// 更改按索引号HASH的HASH链表大小
 static void xfrm_byidx_resize(struct net *net, int total)
 {
 	unsigned int hmask = net->xfrm.policy_idx_hmask;
@@ -513,23 +558,30 @@ static void xfrm_byidx_resize(struct net *net, int total)
 
 static inline int xfrm_bydst_should_resize(struct net *net, int dir, int *total)
 {
+	// 该方向是策略的数量
 	unsigned int cnt = net->xfrm.policy_count[dir];
+	// 该方向是策略的掩码
 	unsigned int hmask = net->xfrm.policy_bydst[dir].hmask;
 
+	// 累加策略数量
 	if (total)
 		*total += cnt;
 
+	// 如果策略数量大于策略掩码量, 该增加了
 	if ((hmask + 1) < xfrm_policy_hashmax &&
 	    cnt > hmask)
 		return 1;
-
+	
+	// 否则不用
 	return 0;
 }
 
+// 检查按索引号HASH的HASH链表
 static inline int xfrm_byidx_should_resize(struct net *net, int total)
 {
 	unsigned int hmask = net->xfrm.policy_idx_hmask;
-
+	
+	// 策略总量超过当前的索引号掩码, 该扩大了
 	if ((hmask + 1) < xfrm_policy_hashmax &&
 	    total > hmask)
 		return 1;
@@ -553,18 +605,24 @@ void xfrm_spd_getinfo(struct net *net, struct xfrmk_spdinfo *si)
 EXPORT_SYMBOL(xfrm_spd_getinfo);
 
 static DEFINE_MUTEX(hash_resize_mutex);
+
+// 改变HASH表大小
 static void xfrm_hash_resize(struct work_struct *work)
 {
 	struct net *net = container_of(work, struct net, xfrm.policy_hash_work);
 	int dir, total;
 
+	// 加resize锁
 	mutex_lock(&hash_resize_mutex);
 
+	// 注意策略都是双向的
 	total = 0;
 	for (dir = 0; dir < XFRM_POLICY_MAX * 2; dir++) {
+		// 按目的地址进行HASH的链表: 如果需要更改HASH表大小, 修改之
 		if (xfrm_bydst_should_resize(net, dir, &total))
 			xfrm_bydst_resize(net, dir);
 	}
+	// 按索引号进行HASH的链表更新
 	if (xfrm_byidx_should_resize(net, total))
 		xfrm_byidx_resize(net, total);
 
@@ -743,6 +801,8 @@ static bool xfrm_policy_mark_match(struct xfrm_policy *policy,
 	return false;
 }
 
+//策略插入函数为xfrm_policy_insert(), 该函数被pfkey_spdadd()函数调用,
+// 注意策略链表是按优先权大小进行排序的有序链表, 因此插入策略时要进行优先权比较后插入到合适的位置.
 int xfrm_policy_insert(int dir, struct xfrm_policy *policy, int excl)
 {
 	struct net *net = xp_net(policy);
@@ -752,34 +812,51 @@ int xfrm_policy_insert(int dir, struct xfrm_policy *policy, int excl)
 	struct hlist_node *newpos;
 
 	write_lock_bh(&net->xfrm.xfrm_policy_lock);
+	// 找到具体的hash链表
 	chain = policy_hash_bysel(net, &policy->selector, policy->family, dir);
 	delpol = NULL;
 	newpos = NULL;
+	// 遍历链表, 该链表是以策略的优先级值进行排序的链表, 因此需要根据新策略的优先级大小
+	// 将新策略插到合适的位置
 	hlist_for_each_entry(pol, chain, bydst) {
+	        // 策略类型比较
 		if (pol->type == policy->type &&
+			// 选择子比较
 		    !selector_cmp(&pol->selector, &policy->selector) &&
 		    xfrm_policy_mark_match(policy, pol) &&
+		    // 安全上下文比较
 		    xfrm_sec_ctx_match(pol->security, policy->security) &&
 		    !WARN_ON(delpol)) {
+		    // 新策略和已有的某策略匹配
 			if (excl) {
+				// 如果是排他性添加操作, 要插入的策略在数据库中已经存在, 发生错误
 				write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 				return -EEXIST;
 			}
+			// 保存好要删除的策略位置
 			delpol = pol;
+			// 要更新的策略优先级值大于原有的优先级值, 重新循环找到合适的插入位置
+			// 因为这个链表是以优先级值进行排序的, 不能乱
+			// 现在delpol已经非空了,  前面的策略查找条件已经不可能满足了
 			if (policy->priority > pol->priority)
 				continue;
 		} else if (policy->priority >= pol->priority) {
+			// 如果新的优先级不低于当前的优先级, 保存当前节点, 继续查找合适插入位置
 			newpos = &pol->bydst;
 			continue;
 		}
+		// 如果已经找到要删除的策略, 中断
 		if (delpol)
 			break;
 	}
+	// 插入策略到按目的地址HASH的链表的指定位置
 	if (newpos)
 		hlist_add_behind(&policy->bydst, newpos);
 	else
 		hlist_add_head(&policy->bydst, chain);
+	// 增加策略引用计数
 	xfrm_pol_hold(policy);
+	// 该方向的策略数增1
 	net->xfrm.policy_count[dir]++;
 	atomic_inc(&net->xfrm.flow_cache_genid);
 
@@ -788,13 +865,16 @@ int xfrm_policy_insert(int dir, struct xfrm_policy *policy, int excl)
 		rt_genid_bump_ipv4(net);
 	else
 		rt_genid_bump_ipv6(net);
-
+	
+	// 如果有相同的老策略, 要从目的地址HASH和索引号HASH这两个表中删除
 	if (delpol) {
 		xfrm_policy_requeue(delpol, policy);
 		__xfrm_policy_unlink(delpol, dir);
 	}
+	// 获取策略索引号, 插入索引HASH链表
 	policy->index = delpol ? delpol->index : xfrm_gen_index(net, dir, policy->index);
 	hlist_add_head(&policy->byidx, net->xfrm.policy_byidx+idx_hash(net, policy->index));
+	// 策略插入实际时间
 	policy->curlft.add_time = get_seconds();
 	policy->curlft.use_time = 0;
 	if (!mod_timer(&policy->timer, jiffies + HZ))
@@ -802,6 +882,7 @@ int xfrm_policy_insert(int dir, struct xfrm_policy *policy, int excl)
 	list_add(&policy->walk.all, &net->xfrm.policy_all);
 	write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 
+	// 释放老策略
 	if (delpol)
 		xfrm_policy_kill(delpol);
 	else if (xfrm_bydst_should_resize(net, dir, NULL))
@@ -811,6 +892,8 @@ int xfrm_policy_insert(int dir, struct xfrm_policy *policy, int excl)
 }
 EXPORT_SYMBOL(xfrm_policy_insert);
 
+//策略查找并删除
+//根据选择子和安全上下文查找策略, 可查找策略并删除, 被pfkey_spddelete()函数调用
 struct xfrm_policy *xfrm_policy_bysel_ctx(struct net *net, u32 mark, u8 type,
 					  int dir, struct xfrm_selector *sel,
 					  struct xfrm_sec_ctx *ctx, int delete,
@@ -821,15 +904,19 @@ struct xfrm_policy *xfrm_policy_bysel_ctx(struct net *net, u32 mark, u8 type,
 
 	*err = 0;
 	write_lock_bh(&net->xfrm.xfrm_policy_lock);
+	// 定位HASH表
 	chain = policy_hash_bysel(net, sel, sel->family, dir);
 	ret = NULL;
+	// 遍历链表
 	hlist_for_each_entry(pol, chain, bydst) {
+	// 根据类型, 选择子和上下文进行匹配
 		if (pol->type == type &&
 		    (mark & pol->mark.m) == pol->mark.v &&
 		    !selector_cmp(sel, &pol->selector) &&
 		    xfrm_sec_ctx_match(ctx, pol->security)) {
 			xfrm_pol_hold(pol);
 			if (delete) {
+				// 要的删除话将策略节点从目的地址HASH链表和索引HASH链表中断开
 				*err = security_xfrm_policy_delete(
 								pol->security);
 				if (*err) {
@@ -845,11 +932,13 @@ struct xfrm_policy *xfrm_policy_bysel_ctx(struct net *net, u32 mark, u8 type,
 	write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 
 	if (ret && delete)
+		// 将策略状态置为dead, 并添加到系统的策略垃圾链表进行调度处理准备删除
 		xfrm_policy_kill(ret);
 	return ret;
 }
 EXPORT_SYMBOL(xfrm_policy_bysel_ctx);
 
+//按索引号查找并删除
 struct xfrm_policy *xfrm_policy_byid(struct net *net, u32 mark, u8 type,
 				     int dir, u32 id, int delete, int *err)
 {
@@ -862,12 +951,16 @@ struct xfrm_policy *xfrm_policy_byid(struct net *net, u32 mark, u8 type,
 
 	*err = 0;
 	write_lock_bh(&net->xfrm.xfrm_policy_lock);
+	// 根据索引号定位链表
 	chain = net->xfrm.policy_byidx + idx_hash(net, id);
 	ret = NULL;
+	// 遍历链表
 	hlist_for_each_entry(pol, chain, byidx) {
+	// 策略的类型和索引号相同
 		if (pol->type == type && pol->index == id &&
 		    (mark & pol->mark.m) == pol->mark.v) {
 			xfrm_pol_hold(pol);
+			// 如果要删除, 将策略节点从链表中删除
 			if (delete) {
 				*err = security_xfrm_policy_delete(
 								pol->security);
@@ -884,6 +977,7 @@ struct xfrm_policy *xfrm_policy_byid(struct net *net, u32 mark, u8 type,
 	write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 
 	if (ret && delete)
+		// 将策略状态置为dead, 并添加到系统的策略垃圾链表进行调度处理准备删除
 		xfrm_policy_kill(ret);
 	return ret;
 }
@@ -935,6 +1029,8 @@ xfrm_policy_flush_secctx_check(struct net *net, u8 type, bool task_valid)
 }
 #endif
 
+//删除某类型的全部安全策略
+//该函数被pfkey_spdflush()等函数调用
 int xfrm_policy_flush(struct net *net, u8 type, bool task_valid)
 {
 	int dir, err = 0, cnt = 0;
@@ -950,33 +1046,41 @@ int xfrm_policy_flush(struct net *net, u8 type, bool task_valid)
 		int i;
 
 	again1:
+		// 遍历inexact HASH链表
 		hlist_for_each_entry(pol,
 				     &net->xfrm.policy_inexact[dir], bydst) {
+		    // 判断类型
 			if (pol->type != type)
 				continue;
+			// 将策略从链表中断开
 			__xfrm_policy_unlink(pol, dir);
 			write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 			cnt++;
 
 			xfrm_audit_policy_delete(pol, 1, task_valid);
 
+			// 将策略状态置为dead, 并添加到系统的策略垃圾链表进行调度处理准备删除
 			xfrm_policy_kill(pol);
 
 			write_lock_bh(&net->xfrm.xfrm_policy_lock);
 			goto again1;
 		}
-
+					 
+		 // 遍历所有目的HASH链表
 		for (i = net->xfrm.policy_bydst[dir].hmask; i >= 0; i--) {
 	again2:
+		    // 遍历按目的地址HASH的链表
 			hlist_for_each_entry(pol,
 					     net->xfrm.policy_bydst[dir].table + i,
 					     bydst) {
 				if (pol->type != type)
 					continue;
+				// 将节点从链表中断开
 				__xfrm_policy_unlink(pol, dir);
 				write_unlock_bh(&net->xfrm.xfrm_policy_lock);
 				cnt++;
 
+				// 释放节点
 				xfrm_audit_policy_delete(pol, 1, task_valid);
 				xfrm_policy_kill(pol);
 
@@ -994,6 +1098,8 @@ out:
 }
 EXPORT_SYMBOL(xfrm_policy_flush);
 
+// func函数用来指定对遍历的策略进行的查找
+// 实际遍历了两次所有策略
 int xfrm_policy_walk(struct net *net, struct xfrm_policy_walk *walk,
 		     int (*func)(struct xfrm_policy *, int, int, void*),
 		     void *data)
@@ -1010,10 +1116,13 @@ int xfrm_policy_walk(struct net *net, struct xfrm_policy_walk *walk,
 		return 0;
 
 	write_lock_bh(&net->xfrm.xfrm_policy_lock);
+//确保之后的遍历是从头开始
 	if (list_empty(&walk->walk.all))
+		//遍历列表找到并返回指向列表头的指针
 		x = list_first_entry(&net->xfrm.policy_all, struct xfrm_policy_walk_entry, all);
 	else
 		x = list_entry(&walk->walk.all, struct xfrm_policy_walk_entry, all);
+	//从头开始遍历遍历列表
 	list_for_each_entry_from(x, &net->xfrm.policy_all, all) {
 		if (x->dead)
 			continue;
@@ -1065,21 +1174,27 @@ EXPORT_SYMBOL(xfrm_policy_walk_done);
  *
  * Returns 0 if policy found, else an -errno.
  */
+// 检查xfrm策略是否和流参数匹配
+// 返回0表示匹配成功
 static int xfrm_policy_match(const struct xfrm_policy *pol,
 			     const struct flowi *fl,
 			     u8 type, u16 family, int dir)
 {
+	// 选择子
 	const struct xfrm_selector *sel = &pol->selector;
 	int ret = -ESRCH;
 	bool match;
 
+	// 检查策略协议族和类型是否匹配
 	if (pol->family != family ||
 	    (fl->flowi_mark & pol->mark.m) != pol->mark.v ||
 	    pol->type != type)
 		return ret;
 
+	// 检查选择子是否匹配, 返回非0值表示匹配成功
 	match = xfrm_selector_match(sel, fl, family);
 	if (match)
+		// 这种security函数可以不用考虑, 当作返回0的函数即可
 		ret = security_xfrm_policy_lookup(pol->security, fl->flowi_secid,
 						  dir);
 
@@ -1096,15 +1211,19 @@ static struct xfrm_policy *xfrm_policy_lookup_bytype(struct net *net, u8 type,
 	struct hlist_head *chain;
 	u32 priority = ~0U;
 
+	// 由流结构的目的和源地址
 	daddr = xfrm_flowi_daddr(fl, family);
 	saddr = xfrm_flowi_saddr(fl, family);
 	if (unlikely(!daddr || !saddr))
 		return NULL;
 
 	read_lock_bh(&net->xfrm.xfrm_policy_lock);
+	// 根据地址信息查找HASH链表
 	chain = policy_hash_direct(net, daddr, saddr, family, dir);
 	ret = NULL;
+	// 循环HASH链表
 	hlist_for_each_entry(pol, chain, bydst) {
+		// 检查流结构,类型和协议族是否匹配策略, 返回0表示匹配
 		err = xfrm_policy_match(pol, fl, type, family, dir);
 		if (err) {
 			if (err == -ESRCH)
@@ -1114,13 +1233,18 @@ static struct xfrm_policy *xfrm_policy_lookup_bytype(struct net *net, u8 type,
 				goto fail;
 			}
 		} else {
+			// 备份找到的策略和优先级
 			ret = pol;
 			priority = ret->priority;
 			break;
 		}
 	}
+	// 再在inexact链表中查找策略, 如果也找到策略, 而且优先级更小,
+	// 将新找到的策略替代前面找到的策略
 	chain = &net->xfrm.policy_inexact[dir];
+	// 循环HASH链表
 	hlist_for_each_entry(pol, chain, bydst) {
+		// 检查流结构,类型和协议族是否匹配策略, 返回0表示匹配
 		err = xfrm_policy_match(pol, fl, type, family, dir);
 		if (err) {
 			if (err == -ESRCH)
@@ -1130,6 +1254,7 @@ static struct xfrm_policy *xfrm_policy_lookup_bytype(struct net *net, u8 type,
 				goto fail;
 			}
 		} else if (pol->priority < priority) {
+			// 如果新找到的策略优先级更小, 将其取代原来找到的策略
 			ret = pol;
 			break;
 		}
@@ -1174,6 +1299,9 @@ static int flow_to_policy_dir(int dir)
 }
 
 static struct flow_cache_object *
+
+// 参数fl是路由相关的结构, 常用于路由查找中
+// 注意返回值是整数, 0成功, 非0失败, 找到的策略通过参数objp进行传递
 xfrm_policy_lookup(struct net *net, const struct flowi *fl, u16 family,
 		   u8 dir, struct flow_cache_object *old_obj, void *ctx)
 {
@@ -1210,6 +1338,7 @@ static inline int policy_to_flow_dir(int dir)
 	}
 }
 
+//查找和sock对应的策略
 static struct xfrm_policy *xfrm_sk_policy_lookup(struct sock *sk, int dir,
 						 const struct flowi *fl, u16 family)
 {
@@ -1217,15 +1346,19 @@ static struct xfrm_policy *xfrm_sk_policy_lookup(struct sock *sk, int dir,
 	struct net *net = sock_net(sk);
 
 	read_lock_bh(&net->xfrm.xfrm_policy_lock);
+	// sock结构中有sk_policy用来指向双向数据的安全策略
 	if ((pol = sk->sk_policy[dir]) != NULL) {
+		// 检查该策略的选择子是否和流结构匹配
 		bool match = xfrm_selector_match(&pol->selector, fl, family);
 		int err = 0;
 
+		// 如果匹配的话将策略作为结果返回
 		if (match) {
 			if ((sk->sk_mark & pol->mark.m) != pol->mark.v) {
 				pol = NULL;
 				goto out;
 			}
+			// 这个security函数可视为返回0的空函数
 			err = security_xfrm_policy_lookup(pol->security,
 						      fl->flowi_secid,
 						      policy_to_flow_dir(dir));
@@ -1392,10 +1525,12 @@ xfrm_tmpl_resolve_one(struct xfrm_policy *policy, const struct flowi *fl,
 	struct net *net = xp_net(policy);
 	int nx;
 	int i, error;
+	// 从流结构中获取地址信息
 	xfrm_address_t *daddr = xfrm_flowi_daddr(fl, family);
 	xfrm_address_t *saddr = xfrm_flowi_saddr(fl, family);
 	xfrm_address_t tmp;
 
+	// 遍历策略中的所有SA
 	for (nx = 0, i = 0; i < policy->xfrm_nr; i++) {
 		struct xfrm_state *x;
 		xfrm_address_t *remote = daddr;
@@ -1404,8 +1539,11 @@ xfrm_tmpl_resolve_one(struct xfrm_policy *policy, const struct flowi *fl,
 
 		if (tmpl->mode == XFRM_MODE_TUNNEL ||
 		    tmpl->mode == XFRM_MODE_BEET) {
+		    // 如果是隧道模式, 会添加外部IP头, 内部IP头都封装在内部, 因此地址信息使用外部地址
+			// 即策略的SA模板中的地址信息
 			remote = &tmpl->id.daddr;
 			local = &tmpl->saddr;
+			// 如果local地址没定义, 选取个源地址作为本地地址, 选取过程是协议族相关的
 			if (xfrm_addr_any(local, tmpl->encap_family)) {
 				error = xfrm_get_saddr(net, &tmp, remote, tmpl->encap_family);
 				if (error)
@@ -1414,15 +1552,17 @@ xfrm_tmpl_resolve_one(struct xfrm_policy *policy, const struct flowi *fl,
 			}
 		}
 
-		x = xfrm_state_find(remote, local, fl, tmpl, policy, &error, family);
-
+		// 根据地址,流,策略等新查找SA(xfrm_state),如果找不到现成的会通知IKE程序进行协商
+		// 生成新的SA, 但生成可用SA前先返回ACQUIRE类型的SAx = xfrm_state_find(remote, local, fl, tmpl, policy, &error, family);
 		if (x && x->km.state == XFRM_STATE_VALID) {
+			// 如果SA是合法, 保存
 			xfrm[nx++] = x;
 			daddr = remote;
 			saddr = local;
 			continue;
 		}
 		if (x) {
+			// x存在但不是VALID的, 只要不出错, 应该是ACQUIRE类型的, 等IKE进程协商结果, 返回-EAGAIN
 			error = (x->km.state == XFRM_STATE_ERROR ?
 				 -EINVAL : -EAGAIN);
 			xfrm_state_put(x);
@@ -1441,23 +1581,28 @@ fail:
 	return error;
 }
 
+// 策略解析, 生成SA
 static int
 xfrm_tmpl_resolve(struct xfrm_policy **pols, int npols, const struct flowi *fl,
 		  struct xfrm_state **xfrm, unsigned short family)
 {
 	struct xfrm_state *tp[XFRM_MAX_DEPTH];
+	// npols > 1是定义了子策略的情况, 这时用tp数组保存找到的SA, 但没法返回原函数中了
 	struct xfrm_state **tpp = (npols > 1) ? tp : xfrm;
 	int cnx = 0;
 	int error;
 	int ret;
 	int i;
 
+	// 遍历策略, 一般情况下npols其实只是1
 	for (i = 0; i < npols; i++) {
+		// 检查保存SA的缓冲区是否还够大
 		if (cnx + pols[i]->xfrm_nr >= XFRM_MAX_DEPTH) {
 			error = -ENOBUFS;
 			goto fail;
 		}
 
+		// 协议一个策略模板
 		ret = xfrm_tmpl_resolve_one(pols[i], fl, &tpp[cnx], family);
 		if (ret < 0) {
 			error = ret;
@@ -1467,6 +1612,7 @@ xfrm_tmpl_resolve(struct xfrm_policy **pols, int npols, const struct flowi *fl,
 	}
 
 	/* found states are sorted for outbound processing */
+	// 多个策略的话对找到的SA排序, 在没定义子策略的情况下是个空函数
 	if (npols > 1)
 		xfrm_state_sort(xfrm, tpp, cnx, family);
 
@@ -1653,7 +1799,8 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 		goto put_states;
 
 	dst_hold(dst);
-
+	
+	//为每个SA都分配安全路由
 	for (; i < nx; i++) {
 		struct xfrm_dst *xdst = xfrm_alloc_dst(net, family);
 		struct dst_entry *dst1 = &xdst->u.dst;
@@ -1665,6 +1812,7 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 		}
 
 		if (xfrm[i]->sel.family == AF_UNSPEC) {
+			//获取SA中的工作模式
 			inner_mode = xfrm_ip2inner_mode(xfrm[i],
 							xfrm_af2proto(family));
 			if (!inner_mode) {
@@ -1675,6 +1823,7 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 		} else
 			inner_mode = xfrm[i]->inner_mode;
 
+		//如果当前路由的前驱为空
 		if (!dst_prev)
 			dst0 = dst1;
 		else {
@@ -1684,7 +1833,8 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 
 		xdst->route = dst;
 		dst_copy_metrics(dst1, dst);
-
+		
+		//如果当前SA的模式不是传输，就进行安全路由的查找
 		if (xfrm[i]->props.mode != XFRM_MODE_TRANSPORT) {
 			family = xfrm[i]->props.family;
 			dst = xfrm_dst_lookup(xfrm[i], tos, &saddr, &daddr,
@@ -1695,6 +1845,7 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 		} else
 			dst_hold(dst);
 
+		//设置安全路由的SA，以及进入和发送的钩子函数
 		dst1->xfrm = xfrm[i];
 		xdst->xfrm_genid = xfrm[i]->genid;
 
@@ -1714,6 +1865,7 @@ static struct dst_entry *xfrm_bundle_create(struct xfrm_policy *policy,
 		trailer_len += xfrm[i]->props.trailer_len;
 	}
 
+	//设置安全路由的前驱
 	dst_prev->child = dst;
 	dst0->path = dst;
 
@@ -1807,13 +1959,27 @@ xfrm_resolve_and_create_bundle(struct xfrm_policy **pols, int num_pols,
 	int err;
 
 	/* Try to instantiate a bundle */
+	
+	// 策略解析, 生成SA
+	
+	// 没找到安全路由, 准备构造新的路由项
+	// 利用策略, 流等参数构造相关SA(xfrm_state)保存在xfrm中, nx为SA数量
 	err = xfrm_tmpl_resolve(pols, num_pols, fl, xfrm, family);
 	if (err <= 0) {
+		// err<0表示失败, 没找到SA
+		// 但如果是-EAGAIN表示已经通知用户空间的IKE进行协商新的SA了,
+		// 目前只生成了ACQUIRE类型的xfrm_state
 		if (err != 0 && err != -EAGAIN)
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTPOLERROR);
 		return ERR_PTR(err);
 	}
 
+	// 创建新的安全路由, 返回0 表示成功, 失败返回负数
+	// dst在成功返回时保存安全路由项, 每个SA处理对应一个安全路由, 这些安全路由通过
+	// 路由项中的child链接为一个链表, 这样就可以对数据包进行连续变换, 如先压缩,
+	// 再ESP封装, 再AH封装等.
+	// 路由项链表的构造和协议族相关, 后续文章中介绍具体协议族中的实现时再详细描述
+	// 所构造出的路由项的具体结构情况
 	dst = xfrm_bundle_create(pols[0], xfrm, err, fl, dst_orig);
 	if (IS_ERR(dst)) {
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTBUNDLEGENERROR);
@@ -2018,6 +2184,7 @@ xfrm_bundle_lookup(struct net *net, const struct flowi *fl, u16 family, u8 dir,
 	int num_pols = 0, num_xfrms = 0, i, err, pol_dead;
 
 	/* Check if the policies from old bundle are usable */
+	//判断就得策略是否能用
 	xdst = NULL;
 	if (oldflo) {
 		xdst = container_of(oldflo, struct xfrm_dst, flo);
@@ -2028,6 +2195,7 @@ xfrm_bundle_lookup(struct net *net, const struct flowi *fl, u16 family, u8 dir,
 			pols[i] = xdst->pols[i];
 			pol_dead |= pols[i]->walk.dead;
 		}
+		// 如果有策略是dead, 释放安全路由
 		if (pol_dead) {
 			dst_free(&xdst->u.dst);
 			xdst = NULL;
@@ -2039,6 +2207,7 @@ xfrm_bundle_lookup(struct net *net, const struct flowi *fl, u16 family, u8 dir,
 
 	/* Resolve policies to use if we couldn't get them from
 	 * previous cache entry */
+	 //如果无法从以前的缓存条目中获取它们，请使用策略
 	if (xdst == NULL) {
 		num_pols = 1;
 		pols[0] = __xfrm_policy_lookup(net, fl, family,
@@ -2132,6 +2301,9 @@ static struct dst_entry *make_blackhole(struct net *net, u16 family,
  * At the moment we eat a raw IP route. Mostly to speed up lookups
  * on interfaces with disabled IPsec.
  */
+ //xfrm_lookup函数是个非常重要的函数, 用来根据安全策略构造数据包的路由项链表, 
+ //该路由项链表反映了对数据包进行IPSEC封装的多层次的处理, 每封装一次, 就增加一个路由项.
+//该函数被路由查找函数ip_route_output_flow()调用, 针对的是转发或发出的数据包.
 struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 			      const struct flowi *fl,
 			      struct sock *sk, int flags)
@@ -2149,6 +2321,9 @@ struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 	route = NULL;
 
 	if (sk && sk->sk_policy[XFRM_POLICY_OUT]) {
+		// 如果在sock中定义了安全策略, 查找该sock相关的策略
+		// 一个socket的安全策略可通过setsockopt()设置, socket选项为
+		// IP_IPSEC_POLICY或IP_XFRM_POLICY(net/ipv4/ip_sockglue.c)
 		num_pols = 1;
 		pols[0] = xfrm_sk_policy_lookup(sk, XFRM_POLICY_OUT, fl, family);
 		err = xfrm_expand_policies(fl, family, pols,
@@ -2162,7 +2337,8 @@ struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 				goto no_transform;
 			}
 
-			xdst = xfrm_resolve_and_create_bundle(
+	//从已建立好的IPSECSA状态中查找匹配策略的SA状态
+	xdst = xfrm_resolve_and_create_bundle(
 					pols, num_pols, fl,
 					family, dst_orig);
 			if (IS_ERR(xdst)) {
@@ -2188,10 +2364,13 @@ struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 		xflo.flags = flags;
 
 		/* To accelerate a bit...  */
+		// 如果初始路由中设置了非IPSEC标志或没有发出方向的安全策略, 直接返回
 		if ((dst_orig->flags & DST_NOXFRM) ||
 		    !net->xfrm.policy_count[XFRM_POLICY_OUT])
 			goto nopol;
 
+		// 查找路由信息, 如果没有就创建路由, xfrm_policy_lookup()函数作为参数传递给
+		// flow_cache_lookup()函数, 查找和该路由对应的安全策略
 		flo = flow_cache_lookup(net, fl, family, dir,
 					xfrm_bundle_lookup, &xflo);
 		if (flo == NULL)
@@ -2344,13 +2523,17 @@ xfrm_policy_ok(const struct xfrm_tmpl *tmpl, const struct sec_path *sp, int star
 	int idx = start;
 
 	if (tmpl->optional) {
+		// 如果是传输模式, 直接返回
 		if (tmpl->mode == XFRM_MODE_TRANSPORT)
 			return start;
 	} else
 		start = -1;
 	for (; idx < sp->len; idx++) {
+		// sp->xvec是xfrm状态
+	    // 如果安全路径和模板匹配,返回索引位置
 		if (xfrm_state_ok(tmpl, sp->xvec[idx], family))
 			return ++idx;
+		// 如果安全路径中的SA不是传输模式,返回错误
 		if (sp->xvec[idx]->props.mode != XFRM_MODE_TRANSPORT) {
 			if (start == -1)
 				start = -2-idx;
@@ -2388,6 +2571,11 @@ static inline int secpath_has_nontransport(const struct sec_path *sp, int k, int
 	return 0;
 }
 
+//__xfrm_policy_check函数也是一个比较重要的函数, 被xfrm_policy_check()调用, 
+//xfrm4_policy_check()和xfrm6_policy_check()调用, 而这两个函数在网络层的输入和转发处调用.
+//通包就返回合法, 对IPSEC包检查策略是否合法, 是否和路由方向匹配
+
+// 返回1表示合法, 0表示不合法, 对于该函数返回0的数据包通常是被丢弃
 int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 			unsigned short family)
 {
@@ -2404,21 +2592,29 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 
 	reverse = dir & ~XFRM_POLICY_MASK;
 	dir &= XFRM_POLICY_MASK;
+	// 将策略方向转换为流方向, 其实值是一样的
 	fl_dir = policy_to_flow_dir(dir);
 
+	// 调用协议族的decode_session()函数, 对IPV4来说就是_decode_session4
+	// 将skb中的地址端口等信息填入流结构fl中
 	if (__xfrm_decode_session(skb, &fl, family, reverse) < 0) {
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMINHDRERROR);
 		return 0;
 	}
 
+	// 如果内核支持NETFILTER, 将调用ip_nat_decode_session函数填写NAT信息
+	// 否则的话就是个空函数
 	nf_nat_decode_session(skb, &fl, family);
 
 	/* First, check used SA against their selectors. */
 	if (skb->sp) {
 		int i;
-
+		
+		// 该包是进行了解密后的IPSEC包
 		for (i = skb->sp->len-1; i >= 0; i--) {
+			// 获取该包相关的SA信息
 			struct xfrm_state *x = skb->sp->xvec[i];
+			// 检查SA选择子和流参数(路由)是否匹配, 结果为0表示不匹配, 不匹配的话返回
 			if (!xfrm_selector_match(&x->sel, &fl, family)) {
 				XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMISMATCH);
 				return 0;
@@ -2427,7 +2623,9 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 	}
 
 	pol = NULL;
+	// 如果sock结构中有策略
 	if (sk && sk->sk_policy[dir]) {
+		// 检查策略是否和流结构匹配, 匹配的话返回策略
 		pol = xfrm_sk_policy_lookup(sk, dir, &fl, family);
 		if (IS_ERR(pol)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINPOLERROR);
@@ -2435,11 +2633,14 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 		}
 	}
 
+	// 查找路由信息, 如果没有就创建路由, xfrm_policy_lookup()函数作为参数传递给
+	// flow_cache_lookup()函数, 查找和该路由对应的安全策略
 	if (!pol) {
 		struct flow_cache_object *flo;
 
 		flo = flow_cache_lookup(net, &fl, family, fl_dir,
 					xfrm_policy_lookup, NULL);
+	    // 查找过程中出错,返回0
 		if (IS_ERR_OR_NULL(flo))
 			pol = ERR_CAST(flo);
 		else
@@ -2450,21 +2651,30 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMINPOLERROR);
 		return 0;
 	}
-
+	
+	// 策略不存在
 	if (!pol) {
+		// 如果该包是IPSEC包而且安全路径中的SA不是传输模式,
+		// 转发时, 对于已经封装的包没必要再次封装;
+		// 输入时, 是自身的IPSEC通信包封装基本也无意义
 		if (skb->sp && secpath_has_nontransport(skb->sp, 0, &xerr_idx)) {
+			// 拒绝该安全路径, 返回0失败
 			xfrm_secpath_reject(xerr_idx, skb, &fl);
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINNOPOLS);
 			return 0;
 		}
+		// 普通包处理, 安全策略不存在, 返回1
 		return 1;
 	}
-
+	
+	// 找到安全策略, 对该包要根据策略进行IPSEC处理
+	// 更新策略当前使用时间
 	pol->curlft.use_time = get_seconds();
 
 	pols[0] = pol;
 	npols++;
 #ifdef CONFIG_XFRM_SUB_POLICY
+	// 如果定义了子策略的话极限查找子策略, 这是标准IPSEC中没定义的, 可以不考虑
 	if (pols[0]->type != XFRM_POLICY_TYPE_MAIN) {
 		pols[1] = xfrm_policy_lookup_bytype(net, XFRM_POLICY_TYPE_MAIN,
 						    &fl, family,
@@ -2480,8 +2690,10 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 	}
 #endif
 
+	// 策略动作是允许通过
 	if (pol->action == XFRM_POLICY_ALLOW) {
 		struct sec_path *sp;
+		// 先伪造个安全路径
 		static struct sec_path dummy;
 		struct xfrm_tmpl *tp[XFRM_MAX_DEPTH];
 		struct xfrm_tmpl *stp[XFRM_MAX_DEPTH];
@@ -2489,24 +2701,32 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 		int ti = 0;
 		int i, k;
 
+		// 如果数据包没有安全路径, 路径指针初始化为伪造的安全路径
 		if ((sp = skb->sp) == NULL)
 			sp = &dummy;
-
+		
+		// 遍历策略数组, 包括主策略和子策略(内核支持子策略的话),一般情况下就一个策略
 		for (pi = 0; pi < npols; pi++) {
+			// 如果有非允许通过的其他安全策略, 放弃
 			if (pols[pi] != pol &&
 			    pols[pi]->action != XFRM_POLICY_ALLOW) {
 				XFRM_INC_STATS(net, LINUX_MIB_XFRMINPOLBLOCK);
 				goto reject;
 			}
+			// 如果策略层次太多, 放弃
 			if (ti + pols[pi]->xfrm_nr >= XFRM_MAX_DEPTH) {
 				XFRM_INC_STATS(net, LINUX_MIB_XFRMINBUFFERERROR);
 				goto reject_error;
 			}
+			// 备份策略中的xfrm向量模板, ti是数量
 			for (i = 0; i < pols[pi]->xfrm_nr; i++)
 				tpp[ti++] = &pols[pi]->xfrm_vec[i];
 		}
+		// 策略数量
 		xfrm_nr = ti;
 		if (npols > 1) {
+			// 如果超过一个策略,进行排序, 只是在内核支持子系统时才用, 否则只是返回错误
+			// 但该错误可以忽略
 			xfrm_tmpl_sort(stp, tpp, xfrm_nr, family, net);
 			tpp = stp;
 		}
@@ -2517,7 +2737,10 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 		 * some barriers, but at the moment barriers
 		 * are implied between each two transformations.
 		 */
+		 // 遍历检查策略模板是否OK
 		for (i = xfrm_nr-1, k = 0; i >= 0; i--) {
+			// 注意k既是输入, 也是输出值, k初始化为0
+			// 返回值大于等于0表示策略合法可用
 			k = xfrm_policy_ok(tpp[i], sp, k, family);
 			if (k < 0) {
 				if (k < -1)
@@ -2528,6 +2751,7 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 			}
 		}
 
+		// 存在非传输模式的策略, 放弃
 		if (secpath_has_nontransport(sp, k, &xerr_idx)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINTMPLMISMATCH);
 			goto reject;
@@ -2538,6 +2762,7 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 	}
 	XFRM_INC_STATS(net, LINUX_MIB_XFRMINPOLBLOCK);
 
+// 放弃, 返回0表示检查不通过
 reject:
 	xfrm_secpath_reject(xerr_idx, skb, &fl);
 reject_error:
@@ -2553,11 +2778,14 @@ int __xfrm_route_forward(struct sk_buff *skb, unsigned short family)
 	struct dst_entry *dst;
 	int res = 1;
 
+	// 路由解码, 填充流结构参数,
+	// 对IPV4实际调用的是_decode_session4(net/ipv4/xfrm4_policy.c)函数
 	if (xfrm_decode_session(skb, &fl, family) < 0) {
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMFWDHDRERROR);
 		return 0;
 	}
-
+	
+	// 根据流结构查找安全路由, 没找到的话创建新的安全路由, 最后形成安全路由链表
 	skb_dst_force(skb);
 
 	dst = xfrm_lookup(net, skb_dst(skb), &fl, NULL, XFRM_LOOKUP_QUEUE);
@@ -2634,6 +2862,7 @@ static struct dst_entry *xfrm_negative_advice(struct dst_entry *dst)
 
 void xfrm_garbage_collect(struct net *net)
 {
+	// 清除相关的所有的xfrm路由项
 	flow_cache_flush(net);
 }
 EXPORT_SYMBOL(xfrm_garbage_collect);
@@ -2667,15 +2896,18 @@ static void xfrm_init_pmtu(struct dst_entry *dst)
 /* Check that the bundle accepts the flow and its components are
  * still valid.
  */
-
+// 判断安全路由项是否可用
+// 返回0表示不可用, 1表示可用
 static int xfrm_bundle_ok(struct xfrm_dst *first)
 {
 	struct dst_entry *dst = &first->u.dst;
 	struct xfrm_dst *last;
 	u32 mtu;
 
+	// 检查路由项
 	if (!dst_check(dst->path, ((struct xfrm_dst *)dst)->path_cookie) ||
-	    (dst->dev && !netif_running(dst->dev)))
+		// 检查网卡是否在运行
+		(dst->dev && !netif_running(dst->dev)))
 		return 0;
 
 	if (dst->flags & DST_XFRM_QUEUE)
@@ -2684,36 +2916,45 @@ static int xfrm_bundle_ok(struct xfrm_dst *first)
 	last = NULL;
 
 	do {
+		// 安全路由
 		struct xfrm_dst *xdst = (struct xfrm_dst *)dst;
 
+		// 检查SA状态是否合法
 		if (dst->xfrm->km.state != XFRM_STATE_VALID)
 			return 0;
 		if (xdst->xfrm_genid != dst->xfrm->genid)
 			return 0;
+		// 严格检查时, 检查非通道模式下的SA地址和流结构参数是否匹配
 		if (xdst->num_pols > 0 &&
 		    xdst->policy_genid != atomic_read(&xdst->pols[0]->genid))
 			return 0;
 
+		// 子路由项的MTU
 		mtu = dst_mtu(dst->child);
 		if (xdst->child_mtu_cached != mtu) {
 			last = xdst;
 			xdst->child_mtu_cached = mtu;
 		}
-
+		
+		// 通用路由检查
 		if (!dst_check(xdst->route, xdst->route_cookie))
 			return 0;
+		// 安全路由相关的普通路由的MTU
 		mtu = dst_mtu(xdst->route);
 		if (xdst->route_mtu_cached != mtu) {
 			last = xdst;
 			xdst->route_mtu_cached = mtu;
 		}
-
+		
+		// 遍历安全路由链表
 		dst = dst->child;
 	} while (dst->xfrm);
 
+	// last是最后一个和子路由和普通路由的MTU不同的安全路由, 一般都是相同的
 	if (likely(!last))
 		return 1;
 
+	// 调整各路由项中的MTU
 	mtu = last->child_mtu_cached;
 	for (;;) {
 		dst = &last->u.dst;
@@ -2752,6 +2993,7 @@ static struct neighbour *xfrm_neigh_lookup(const struct dst_entry *dst,
 	return dst->path->ops->neigh_lookup(dst, skb, daddr);
 }
 
+// 登记协议信息结构
 int xfrm_policy_register_afinfo(struct xfrm_policy_afinfo *afinfo)
 {
 	int err = 0;
@@ -2760,10 +3002,13 @@ int xfrm_policy_register_afinfo(struct xfrm_policy_afinfo *afinfo)
 	if (unlikely(afinfo->family >= NPROTO))
 		return -EAFNOSUPPORT;
 	spin_lock(&xfrm_policy_afinfo_lock);
+	// 数组中的对应协议的协议信息结构元素应该为空
 	if (unlikely(xfrm_policy_afinfo[afinfo->family] != NULL))
 		err = -ENOBUFS;
 	else {
+		// 安全路由操作结构
 		struct dst_ops *dst_ops = afinfo->dst_ops;
+		// 安全路由操作结构的参数和操作函数赋值
 		if (likely(dst_ops->kmem_cachep == NULL))
 			dst_ops->kmem_cachep = xfrm_dst_cache;
 		if (likely(dst_ops->check == NULL))
@@ -2780,6 +3025,7 @@ int xfrm_policy_register_afinfo(struct xfrm_policy_afinfo *afinfo)
 			dst_ops->neigh_lookup = xfrm_neigh_lookup;
 		if (likely(afinfo->garbage_collect == NULL))
 			afinfo->garbage_collect = xfrm_garbage_collect_deferred;
+		// 数组中的对应协议的协议信息结构元素填为协议信息结构
 		rcu_assign_pointer(xfrm_policy_afinfo[afinfo->family], afinfo);
 	}
 	spin_unlock(&xfrm_policy_afinfo_lock);
@@ -2788,6 +3034,7 @@ int xfrm_policy_register_afinfo(struct xfrm_policy_afinfo *afinfo)
 }
 EXPORT_SYMBOL(xfrm_policy_register_afinfo);
 
+// 拆除协议信息结构
 int xfrm_policy_unregister_afinfo(struct xfrm_policy_afinfo *afinfo)
 {
 	int err = 0;
@@ -2797,6 +3044,7 @@ int xfrm_policy_unregister_afinfo(struct xfrm_policy_afinfo *afinfo)
 		return -EAFNOSUPPORT;
 	spin_lock(&xfrm_policy_afinfo_lock);
 	if (likely(xfrm_policy_afinfo[afinfo->family] != NULL)) {
+		// 数组中的协议信息结构等于指定的信息结构
 		if (unlikely(xfrm_policy_afinfo[afinfo->family] != afinfo))
 			err = -EINVAL;
 		else
@@ -2805,6 +3053,7 @@ int xfrm_policy_unregister_afinfo(struct xfrm_policy_afinfo *afinfo)
 	}
 	spin_unlock(&xfrm_policy_afinfo_lock);
 	if (!err) {
+		// 清空协议信息数组元素和路由操作结构参数
 		struct dst_ops *dst_ops = afinfo->dst_ops;
 
 		synchronize_rcu();
@@ -2819,17 +3068,20 @@ int xfrm_policy_unregister_afinfo(struct xfrm_policy_afinfo *afinfo)
 }
 EXPORT_SYMBOL(xfrm_policy_unregister_afinfo);
 
+// 网卡通知回调函数
 static int xfrm_dev_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 
 	switch (event) {
+	// 如果网卡down掉的话, 清除相关的所有的xfrm路由项
 	case NETDEV_DOWN:
 		xfrm_garbage_collect(dev_net(dev));
 	}
 	return NOTIFY_DONE;
 }
 
+// 网卡通知结构
 static struct notifier_block xfrm_dev_notifier = {
 	.notifier_call	= xfrm_dev_event,
 };
@@ -2869,25 +3121,32 @@ static int __net_init xfrm_policy_init(struct net *net)
 	int dir;
 
 	if (net_eq(net, &init_net))
+		//建立一个内核cache, 用于分配xfrm_dst结构
 		xfrm_dst_cache = kmem_cache_create("xfrm_dst_cache",
 					   sizeof(struct xfrm_dst),
 					   0, SLAB_HWCACHE_ALIGN|SLAB_PANIC,
 					   NULL);
-
+	//建立一个内核cache,
+	//用于分配xfrm_dst结构
 	hmask = 8 - 1;
 	sz = (hmask+1) * sizeof(struct hlist_head);
 
+	//该HASH表是按策略的index参数进行索引的
 	net->xfrm.policy_byidx = xfrm_hash_alloc(sz);
 	if (!net->xfrm.policy_byidx)
 		goto out_byidx;
 	net->xfrm.policy_idx_hmask = hmask;
 
+	//输入, 输出, 转发三个处理点, 双向
 	for (dir = 0; dir < XFRM_POLICY_MAX * 2; dir++) {
 		struct xfrm_policy_hash *htab;
 
+		//初始化inexact链表头, inexact处理选择子相关
+		//长度不是标准值的一些特别策略
 		net->xfrm.policy_count[dir] = 0;
 		INIT_HLIST_HEAD(&net->xfrm.policy_inexact[dir]);
 
+		//分配按地址HASH的HASH表
 		htab = &net->xfrm.policy_bydst[dir];
 		htab->table = xfrm_hash_alloc(sz);
 		if (!htab->table)
@@ -2909,6 +3168,7 @@ static int __net_init xfrm_policy_init(struct net *net)
 	INIT_WORK(&net->xfrm.policy_hash_work, xfrm_hash_resize);
 	INIT_WORK(&net->xfrm.policy_hthresh.work, xfrm_hash_rebuild);
 	if (net_eq(net, &init_net))
+		//登记网卡通知，参看下面网卡通知回调实现
 		register_netdevice_notifier(&xfrm_dev_notifier);
 	return 0;
 
@@ -3009,6 +3269,7 @@ static struct pernet_operations __net_initdata xfrm_net_ops = {
 void __init xfrm_init(void)
 {
 	register_pernet_subsys(&xfrm_net_ops);
+	//输入初始化
 	xfrm_input_init();
 }
 

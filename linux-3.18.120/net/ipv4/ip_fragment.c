@@ -635,22 +635,26 @@ out_fail:
 /* Process an incoming IP datagram fragment. */
 int ip_defrag(struct sk_buff *skb, u32 user)
 {
-	struct ipq *qp;
+	struct ipq *qp;//ip碎片队列
 	struct net *net;
 
+	//获取接收的网络设备
 	net = skb->dev ? dev_net(skb->dev) : dev_net(skb_dst(skb)->dev);
 	IP_INC_STATS_BH(net, IPSTATS_MIB_REASMREQDS);
 
 	/* Lookup (or create) queue header */
+	
+	//利用ip_find查找分片所属的ipq，若果找不到，则创建一个新的ipq
 	if ((qp = ip_find(net, ip_hdr(skb), user)) != NULL) {
 		int ret;
 
 		spin_lock(&qp->q.lock);
 
+		//将IP分片加入到该队列，如果可能的话，对IP分片进行重组
 		ret = ip_frag_queue(qp, skb);
 
 		spin_unlock(&qp->q.lock);
-		ipq_put(qp);
+		ipq_put(qp);//引用计数减1
 		return ret;
 	}
 

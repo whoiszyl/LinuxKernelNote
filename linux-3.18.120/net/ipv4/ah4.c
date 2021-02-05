@@ -142,6 +142,8 @@ static void ah_output_done(struct crypto_async_request *base, int err)
 	xfrm_output_resume(skb, err);
 }
 
+// 发送数据处理, 在xfrm4_output_one()中调用
+// 计算AH认证值, 添加AH头
 static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 {
 	int err;
@@ -168,6 +170,8 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 	nfrags = err;
 
 	skb_push(skb, -skb_network_offset(skb));
+	// AH头定位在外部IP头后面, skb缓冲中已经预留出AH头的数据部分了,
+	// 这是通过mode->output函数预留的, 通常调用type->output前要调用mode->oputput
 	ah = ip_auth_hdr(skb);
 	ihl = ip_hdrlen(skb);
 
@@ -176,6 +180,7 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 		seqhi_len = sizeof(*seqhi);
 	}
 	err = -ENOMEM;
+	// 临时IP头,用于临时保存IP头内部分字段数据
 	iph = ah_alloc_tmp(ahash, nfrags + sglists, ihl + seqhi_len);
 	if (!iph)
 		goto out;
@@ -187,12 +192,15 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 
 	memset(ah->auth_data, 0, ahp->icv_trunc_len);
 
+	// 临时IP头,用于临时保存IP头内部分字段数据
 	top_iph = ip_hdr(skb);
 
+	// 将当前IP头中不进行认证的字段数据复制到临时IP头
 	iph->tos = top_iph->tos;
 	iph->ttl = top_iph->ttl;
 	iph->frag_off = top_iph->frag_off;
 
+	// 如果有IP选项, 处理IP选项
 	if (top_iph->ihl != 5) {
 		iph->daddr = top_iph->daddr;
 		memcpy(iph+1, top_iph+1, top_iph->ihl*4 - sizeof(struct iphdr));
@@ -200,23 +208,30 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 		if (err)
 			goto out_free;
 	}
-
+	
+	// AH中的下一个头用原来的外部IP头中的协议
 	ah->nexthdr = *skb_mac_header(skb);
+	// IP协议改为AH
 	*skb_mac_header(skb) = IPPROTO_AH;
 
+	// 将外部IP头的不进行认证计算的部分字段清零
 	top_iph->tos = 0;
 	top_iph->tot_len = htons(skb->len);
 	top_iph->frag_off = 0;
 	top_iph->ttl = 0;
 	top_iph->check = 0;
 
+	// AH头长度对齐
 	if (x->props.flags & XFRM_STATE_ALIGN4)
 		ah->hdrlen  = (XFRM_ALIGN4(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
 	else
 		ah->hdrlen  = (XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
 
+	// AH头参数赋值
 	ah->reserved = 0;
+	// SPI值
 	ah->spi = x->id.spi;
+	// 序列号
 	ah->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.low);
 
 	sg_init_table(sg, nfrags + sglists);
@@ -244,8 +259,10 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 		goto out_free;
 	}
 
+	// 赋值初始化向量值到认证数据部分
 	memcpy(ah->auth_data, icv, ahp->icv_trunc_len);
 
+	// 恢复原来IP头的的不认证部分的值
 	top_iph->tos = iph->tos;
 	top_iph->ttl = iph->ttl;
 	top_iph->frag_off = iph->frag_off;
@@ -298,6 +315,8 @@ out:
 	xfrm_input_resume(skb, err);
 }
 
+// 接收数据处理, 在xfrm4_rcv_encap()函数中调用
+// 进行AH认证, 剥离AH头
 static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 {
 	int ah_hlen;
@@ -319,10 +338,13 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 	int sglists = 0;
 	struct scatterlist *seqhisg;
 
+	// skb数据包要准备留出AH头空间
 	if (!pskb_may_pull(skb, sizeof(*ah)))
 		goto out;
 
+	// IP上层数据为AH数据
 	ah = (struct ip_auth_hdr *)skb->data;
+	// SA相关的AH处理数据
 	ahp = x->data;
 	ahash = ahp->ahash;
 
@@ -330,6 +352,7 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 	ah_hlen = (ah->hdrlen + 2) << 2;
 
 	if (x->props.flags & XFRM_STATE_ALIGN4) {
+		// AH头部长度合法性检查
 		if (ah_hlen != XFRM_ALIGN4(sizeof(*ah) + ahp->icv_full_len) &&
 		    ah_hlen != XFRM_ALIGN4(sizeof(*ah) + ahp->icv_trunc_len))
 			goto out;
@@ -339,6 +362,7 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 			goto out;
 	}
 
+	// skb数据包要准备留出实际AH头空间
 	if (!pskb_may_pull(skb, ah_hlen))
 		goto out;
 
@@ -354,8 +378,10 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 		goto out;
 	nfrags = err;
 
+	// 可能包已经进行了复制, 所以对ah重新赋值
 	ah = (struct ip_auth_hdr *)skb->data;
 	iph = ip_hdr(skb);
+	// IP头长度
 	ihl = ip_hdrlen(skb);
 
 	if (x->props.flags & XFRM_STATE_ESN) {
@@ -375,14 +401,18 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 	sg = ah_req_sg(ahash, req);
 	seqhisg = sg + nfrags;
 
+	// 备份外部IP头数据
 	memcpy(work_iph, iph, ihl);
+	// 拷贝数据包中的认证数据到缓冲区
 	memcpy(auth_data, ah->auth_data, ahp->icv_trunc_len);
 	memset(ah->auth_data, 0, ahp->icv_trunc_len);
 
+	// 将IP头中的一些参数清零, 这些参数不进行认证
 	iph->ttl = 0;
 	iph->tos = 0;
 	iph->frag_off = 0;
 	iph->check = 0;
+	// IP头长度超过20字节时,处理IP选项参数
 	if (ihl > sizeof(*iph)) {
 		__be32 dummy;
 		err = ip_clear_mutable_options(iph, &dummy);
@@ -390,6 +420,7 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 			goto out_free;
 	}
 
+	// 包括IP头部分数据
 	skb_push(skb, ihl);
 
 	sg_init_table(sg, nfrags + sglists);
@@ -421,6 +452,7 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 
 	skb->network_header += ah_hlen;
 	memcpy(skb_network_header(skb), work_iph, ihl);
+	// skb包缩减原来的IP头和AH头, 以新IP头作为数据开始
 	__skb_pull(skb, ah_hlen + ihl);
 	if (x->props.mode == XFRM_MODE_TUNNEL)
 		skb_reset_transport_header(skb);
@@ -435,13 +467,17 @@ out:
 	return err;
 }
 
+// 错误处理, 收到ICMP错误包时的处理情况, 此时的skb包是ICMP包
 static int ah4_err(struct sk_buff *skb, u32 info)
 {
 	struct net *net = dev_net(skb->dev);
+	// 应用层, data指向ICMP错误包里的内部IP头
 	const struct iphdr *iph = (const struct iphdr *)skb->data;
+	// AH头
 	struct ip_auth_hdr *ah = (struct ip_auth_hdr *)(skb->data+(iph->ihl<<2));
 	struct xfrm_state *x;
 
+	// ICMP错误类型检查, 本处理函数只处理"目的不可达"和"需要分片"两种错误
 	switch (icmp_hdr(skb)->type) {
 	case ICMP_DEST_UNREACH:
 		if (icmp_hdr(skb)->code != ICMP_FRAG_NEEDED)
@@ -452,6 +488,7 @@ static int ah4_err(struct sk_buff *skb, u32 info)
 		return 0;
 	}
 
+	// 重新查找SA
 	x = xfrm_state_lookup(net, skb->mark, (const xfrm_address_t *)&iph->daddr,
 			      ah->spi, IPPROTO_AH, AF_INET);
 	if (!x)
@@ -466,26 +503,35 @@ static int ah4_err(struct sk_buff *skb, u32 info)
 	return 0;
 }
 
+// 该函数被xfrm状态(SA)初始化函数xfrm_init_state调用
+// 用来生成SA中所用的AH数据处理结构相关信息
 static int ah_init_state(struct xfrm_state *x)
 {
 	struct ah_data *ahp = NULL;
 	struct xfrm_algo_desc *aalg_desc;
 	struct crypto_ahash *ahash;
 
+	// 对AH协议的SA, 认证算法是必须的, 否则就没法进行AH认证了
 	if (!x->aalg)
 		goto error;
 
+	// 如果要进行UDP封装(进行NAT穿越), 错误, 因为AH是不支持NAT的
 	if (x->encap)
 		goto error;
 
+	// 分配ah_data数据结构空间
 	ahp = kzalloc(sizeof(*ahp), GFP_KERNEL);
 	if (!ahp)
 		return -ENOMEM;
 
+	// 分配认证算法HASH结构指针并赋值给AH数据结构
+	// 算法是固定相同的, 但在每个应用使用算法时的上下文是不同的, 该结构就是描述具体应用
+	// 时的相关处理的上下文数据的
 	ahash = crypto_alloc_ahash(x->aalg->alg_name, 0, 0);
 	if (IS_ERR(ahash))
 		goto error;
-
+	
+	// 设置AH数据结构的密钥和长度
 	ahp->ahash = ahash;
 	if (crypto_ahash_setkey(ahash, x->aalg->alg_key,
 				(x->aalg->alg_key_len + 7) / 8))
@@ -497,6 +543,7 @@ static int ah_init_state(struct xfrm_state *x)
 	 * we need for AH processing.  This lookup cannot fail here
 	 * after a successful crypto_alloc_ahash().
 	 */
+	 // 分配算法描述结构
 	aalg_desc = xfrm_aalg_get_byname(x->aalg->alg_name, 0);
 	BUG_ON(!aalg_desc);
 
@@ -508,7 +555,8 @@ static int ah_init_state(struct xfrm_state *x)
 			aalg_desc->uinfo.auth.icv_fullbits / 8);
 		goto error;
 	}
-
+		
+	// AH数据结构的初始化向量的总长和截断长度的赋值 
 	ahp->icv_full_len = aalg_desc->uinfo.auth.icv_fullbits/8;
 	ahp->icv_trunc_len = x->aalg->alg_trunc_len/8;
 
@@ -516,10 +564,14 @@ static int ah_init_state(struct xfrm_state *x)
 		x->props.header_len = XFRM_ALIGN4(sizeof(struct ip_auth_hdr) +
 						  ahp->icv_trunc_len);
 	else
+		// AH类型SA中AH头长度: ip_auth_hdr结构和初始化向量长度, 按8字节对齐 
+		// 反映在AH封装操作时要将数据包增加的长度
 		x->props.header_len = XFRM_ALIGN8(sizeof(struct ip_auth_hdr) +
 						  ahp->icv_trunc_len);
+	// 如果是通道模式, 增加IP头长度
 	if (x->props.mode == XFRM_MODE_TUNNEL)
 		x->props.header_len += sizeof(struct iphdr);
+	// SA数据指向AH数据结构		
 	x->data = ahp;
 
 	return 0;
@@ -532,14 +584,16 @@ error:
 	return -EINVAL;
 }
 
+// 该函数被xfrm状态(SA)释放函数xfrm_state_gc_destroy()调用
 static void ah_destroy(struct xfrm_state *x)
 {
 	struct ah_data *ahp = x->data;
 
 	if (!ahp)
 		return;
-
+	// 算法描述释放
 	crypto_free_ahash(ahp->ahash);
+	// AH数据结构释放
 	kfree(ahp);
 }
 
@@ -548,15 +602,20 @@ static int ah4_rcv_cb(struct sk_buff *skb, int err)
 	return 0;
 }
 
+// AH4的xfrm协议处理结构
 static const struct xfrm_type ah_type =
 {
 	.description	= "AH4",
 	.owner		= THIS_MODULE,
 	.proto	     	= IPPROTO_AH,
 	.flags		= XFRM_TYPE_REPLAY_PROT,
+	// 状态初始化
 	.init_state	= ah_init_state,
+	// 协议释放
 	.destructor	= ah_destroy,
+	// 协议输入
 	.input		= ah_input,
+	// 协议输出
 	.output		= ah_output
 };
 
@@ -570,10 +629,12 @@ static struct xfrm4_protocol ah4_protocol = {
 
 static int __init ah4_init(void)
 {
+	// 登记AH协议的xfrm协议处理结构
 	if (xfrm_register_type(&ah_type, AF_INET) < 0) {
 		pr_info("%s: can't add xfrm type\n", __func__);
 		return -EAGAIN;
 	}
+	// 登记AH协议到IP协议
 	if (xfrm4_protocol_register(&ah4_protocol, IPPROTO_AH) < 0) {
 		pr_info("%s: can't add protocol\n", __func__);
 		xfrm_unregister_type(&ah_type, AF_INET);

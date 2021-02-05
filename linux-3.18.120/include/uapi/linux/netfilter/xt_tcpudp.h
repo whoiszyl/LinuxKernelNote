@@ -4,6 +4,8 @@
 #include <linux/types.h>
 
 /* TCP matching stuff */
+//Tcp匹配规则信息。 
+
 struct xt_tcp {
 	__u16 spts[2];			/* Source port range. */
 	__u16 dpts[2];			/* Destination port range. */
@@ -21,6 +23,7 @@ struct xt_tcp {
 #define XT_TCP_INV_MASK		0x0F	/* All possible flags. */
 
 /* UDP matching stuff */
+//udp匹配规则信息 
 struct xt_udp {
 	__u16 spts[2];			/* Source port range. */
 	__u16 dpts[2];			/* Destination port range. */

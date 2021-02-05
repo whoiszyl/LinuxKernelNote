@@ -5,8 +5,8 @@
 #include <net/netfilter/nf_conntrack_tuple.h>
 
 enum nf_nat_manip_type {
-	NF_NAT_MANIP_SRC,
-	NF_NAT_MANIP_DST
+	NF_NAT_MANIP_SRC,//修改报文的源地址
+	NF_NAT_MANIP_DST//修改报文的目的地址
 };
 
 /* SRC manip occurs POST_ROUTING or LOCAL_IN */

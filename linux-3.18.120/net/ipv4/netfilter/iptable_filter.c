@@ -60,6 +60,10 @@ static int __net_init iptable_filter_net_init(struct net *net)
 {
 	struct ipt_replace *repl;
 
+	/*调用ipt_alloc_initial_table(& packet_filter)根据packet_filter结构的值来 
+	初始化这个ipt_replace结构（之所以要用这个ipt_replace结构而不直接初始化所有的表的信息，
+	可能是为了统一接口，统一调用xt_replace_table函数来替换表的信息 ）*/
+
 	repl = ipt_alloc_initial_table(&packet_filter);
 	if (repl == NULL)
 		return -ENOMEM;

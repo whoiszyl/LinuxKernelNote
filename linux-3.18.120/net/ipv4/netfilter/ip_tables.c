@@ -80,8 +80,12 @@ ip_packet_match(const struct iphdr *ip,
 {
 	unsigned long ret;
 
+/*定义一个宏，当bool和invflg的是一真一假的情况时，返回真。注意这里使用两个“！”的目的是使得这样计算后的值域只取0和1两个值*/
 #define FWINV(bool, invflg) ((bool) ^ !!(ipinfo->invflags & (invflg)))
 
+	/*处理源和目标ip地址，这个if语句的意义是：到达分组的源ip地址经过掩码处理后与规则中的ip不匹配        
+	  并且规则中没有包含对ip地址的取反，或者规则中包含了对匹配地址的取反，但到达分组的源ip与规则中的ip地址匹配，
+	  if的第一部分返回真，同样道理处理到达分组的目的ip地址。这两部分任意部分为真时，源或者目标地址不匹配。*/
 	if (FWINV((ip->saddr&ipinfo->smsk.s_addr) != ipinfo->src.s_addr,
 		  IPT_INV_SRCIP) ||
 	    FWINV((ip->daddr&ipinfo->dmsk.s_addr) != ipinfo->dst.s_addr,
@@ -286,6 +290,11 @@ struct ipt_entry *ipt_next_entry(const struct ipt_entry *entry)
 
 /* Returns one of the generic firewall policies, like NF_ACCEPT. */
 unsigned int
+/*函数参数：skb表示传输的数据包，hook表示哪一个钩子点处，in表示进来的网络设备接口，
+			out表示出去的网络设备接口，table表示哪一个模块的表。
+  函数功能：通过调用ipt_do_table( )函数来完成Netfilter目标的处理。ipt_do_table( )
+  			查找表中的所有ipt_entry，如果每条match都匹配，则调用target函数进一步处理。
+  返回值：      成功返回NF_ACCEPT，反之返回相应的错误码。			*/
 ipt_do_table(struct sk_buff *skb,
 	     unsigned int hook,
 	     const struct net_device *in,
@@ -305,44 +314,51 @@ ipt_do_table(struct sk_buff *skb,
 	unsigned int addend;
 
 	/* Initialization */
-	ip = ip_hdr(skb);
-	indev = in ? in->name : nulldevname;
-	outdev = out ? out->name : nulldevname;
+	ip = ip_hdr(skb);  /* 获取IP头 */
+	indev = in ? in->name : nulldevname; /*取得输入设备名*/
+	outdev = out ? out->name : nulldevname;/*取得输出设备名*/
 	/* We handle fragments by dealing with the first fragment as
 	 * if it was a normal packet.  All other fragments are treated
 	 * normally, except that they will NEVER match rules that ask
 	 * things we don't know, ie. tcp syn flag or ports).  If the
 	 * rule is also a fragment-specific rule, non-fragments won't
 	 * match it. */
-	acpar.fragoff = ntohs(ip->frag_off) & IP_OFFSET;
-	acpar.thoff   = ip_hdrlen(skb);
-	acpar.hotdrop = false;
+	acpar.fragoff = ntohs(ip->frag_off) & IP_OFFSET;//设置分片包的偏移，用来处理分片报文
+	acpar.thoff   = ip_hdrlen(skb);/* 指向数据区 */
+	acpar.hotdrop = false;//hotdrop为true时就直接返回NF_DROP了，这是快速扔包的方法
 	acpar.in      = in;
 	acpar.out     = out;
 	acpar.family  = NFPROTO_IPV4;
 	acpar.hooknum = hook;
 
+	/*检验HOOK，debug用的*/
 	IP_NF_ASSERT(table->valid_hooks & (1 << hook));
 	local_bh_disable();
+	//获取这个是我们要操作的table里面的实际数据
 	addend = xt_write_recseq_begin();
 	private = table->private;
+	//获取当前处理的CPUid
 	cpu        = smp_processor_id();
 	/*
 	 * Ensure we load private-> members after we've fetched the base
 	 * pointer.
 	 */
+	 //内存屏蔽，防止各个cpu锁竞争
 	smp_read_barrier_depends();
+	/*获取表的首个规则的地址*/
 	table_base = private->entries[cpu];
 	jumpstack  = (struct ipt_entry **)private->jumpstack[cpu];
 	stackptr   = per_cpu_ptr(private->stackptr, cpu);
 	origptr    = *stackptr;
 
+	/*获取到相应规则链的首个规则*/
 	e = get_entry(table_base, private->hook_entry[hook]);
 
 	pr_debug("Entering %s(hook %u); sp at %u (UF %p)\n",
 		 table->name, hook, origptr,
 		 get_entry(table_base, private->underflow[hook]));
 
+	/*循环遍历表的rule*/
 	do {
 		const struct xt_entry_target *t;
 		const struct xt_entry_match *ematch;
@@ -351,7 +367,7 @@ ipt_do_table(struct sk_buff *skb,
 		if (!ip_packet_match(ip, indev, outdev,
 		    &e->ip, acpar.fragoff)) {
  no_match:
-			e = ipt_next_entry(e);
+			e = ipt_next_entry(e); /* 匹配失败，跳到下一个规则 */
 			continue;
 		}
 
@@ -362,8 +378,10 @@ ipt_do_table(struct sk_buff *skb,
 				goto no_match;
 		}
 
+		/* 这个宏用来分别处理字节计数器和分组计数器这两个计数器 */
 		ADD_COUNTER(e->counters, skb->len, 1);
 
+		/*获取规则的target的偏移地址*/
 		t = ipt_get_target(e);
 		IP_NF_ASSERT(t->u.kernel.target);
 
@@ -374,6 +392,8 @@ ipt_do_table(struct sk_buff *skb,
 				     table->name, private, e);
 #endif
 		/* Standard target? */
+		/* 下面开始匹备target */
+
 		if (!t->u.kernel.target->target) {
 			int v;
 
@@ -782,6 +802,9 @@ cleanup_entry(struct ipt_entry *e, struct net *net)
 	module_put(par.target->me);
 }
 
+/*
+translate_table函数将newinfo表示的table的各个规则进行边界检测，然后对于newinfo所指的
+ipt_table_info结构中的hook_entries和underflows赋予正确的值，最后将表项向其他CPU拷贝*/
 /* Checks and translates the user-supplied table segment (held in
    newinfo) */
 static int
@@ -796,12 +819,14 @@ translate_table(struct net *net, struct xt_table_info *newinfo, void *entry0,
 	newinfo->size = repl->size;
 	newinfo->number = repl->num_entries;
 
+	/* 初始化所有的hooks为不可能出现的值*/
 	/* Init all hooks to impossible value. */
 	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
 		newinfo->hook_entry[i] = 0xFFFFFFFF;
 		newinfo->underflow[i] = 0xFFFFFFFF;
 	}
 
+	//检测是否内存越界
 	duprintf("translate_table: size %u\n", newinfo->size);
 	offsets = xt_alloc_entry_offsets(newinfo->number);
 	if (!offsets)
@@ -1939,13 +1964,20 @@ struct xt_table *ipt_register_table(struct net *net,
 	}
 
 	/* choose the copy on our node/cpu, but dont care about preemption */
+	//将filter表中的规则入口地址赋值给loc_cpu_entry
 	loc_cpu_entry = newinfo->entries[raw_smp_processor_id()];
+	//将filter表中的规则入口地址赋值给loc_cpu_entry
 	memcpy(loc_cpu_entry, repl->entries, repl->size);
+
+	/*translate_table函数将由newinfo所表示的table的各个规则进行边界检查，
+	  然后对于newinfo所指的xt_talbe_info结构中的hook_entries和underflows赋予正确的值，
+	  最后将表项向其他cpu拷贝*/
 
 	ret = translate_table(net, newinfo, loc_cpu_entry, repl);
 	if (ret != 0)
 		goto out_free;
 
+	//这才是真正注册我们filter表的地方
 	new_table = xt_register_table(net, table, &bootstrap, newinfo);
 	if (IS_ERR(new_table)) {
 		ret = PTR_ERR(new_table);

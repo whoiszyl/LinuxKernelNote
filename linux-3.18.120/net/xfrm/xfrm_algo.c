@@ -153,7 +153,7 @@ static struct xfrm_algo_desc aead_list[] = {
 	}
 },
 };
-
+//可用的认证算法通过下面的数组来描述, 包含NULL, MD5, SHA1, SHA256, RIPEMD160等认证算法:
 static struct xfrm_algo_desc aalg_list[] = {
 {
 	.name = "digest_null",
@@ -180,15 +180,15 @@ static struct xfrm_algo_desc aalg_list[] = {
 
 	.uinfo = {
 		.auth = {
-			.icv_truncbits = 96,
-			.icv_fullbits = 128,
+			.icv_truncbits = 96,// 96位截断
+			.icv_fullbits = 128,// 总共128位
 		}
 	},
 
 	.pfkey_supported = 1,
 
-	.desc = {
-		.sadb_alg_id = SADB_AALG_MD5HMAC,
+	.desc = {// 这是对md5认证算法的标准描述参数
+		.sadb_alg_id = SADB_AALG_MD5HMAC,// 算法ID值
 		.sadb_alg_ivlen = 0,
 		.sadb_alg_minbits = 128,
 		.sadb_alg_maxbits = 128
@@ -326,6 +326,7 @@ static struct xfrm_algo_desc aalg_list[] = {
 },
 };
 
+//可用的认证算法通过下面的数组来描述, 包含NULL, DES, 3DES, CAST, AES, BLOWFISH, TWOFISH, SERPENT等加密算法:
 static struct xfrm_algo_desc ealg_list[] = {
 {
 	.name = "ecb(cipher_null)",
@@ -627,18 +628,20 @@ static struct xfrm_algo_desc *xfrm_find_algo(
 	for (i = 0; i < algo_list->entries; i++) {
 		if (!match(list + i, data))
 			continue;
-
+		// 找到算法结构
+		// 检查算法是否在内核可用, 可用的话成功返回
 		if (list[i].available)
 			return &list[i];
-
+		// 如果不需要探测, 将返回空
 		if (!probe)
 			break;
-
+		// 需要探测算法算法存在内核, 调用crypto_has_alg()函数探测
+		// 返回0表示失败, 非0表示成功
 		status = crypto_has_alg(list[i].name, algo_list->type,
 					algo_list->mask);
 		if (!status)
 			break;
-
+		// 算法可用, 返回
 		list[i].available = status;
 		return &list[i];
 	}
@@ -651,6 +654,7 @@ static int xfrm_alg_id_match(const struct xfrm_algo_desc *entry,
 	return entry->desc.sadb_alg_id == (unsigned long)data;
 }
 
+// 通过算法ID查找认证算法
 struct xfrm_algo_desc *xfrm_aalg_get_byid(int alg_id)
 {
 	return xfrm_find_algo(&xfrm_aalg_list, xfrm_alg_id_match,
@@ -658,6 +662,7 @@ struct xfrm_algo_desc *xfrm_aalg_get_byid(int alg_id)
 }
 EXPORT_SYMBOL_GPL(xfrm_aalg_get_byid);
 
+// 通过算法ID查找加密算法, 和认证算法查找类似
 struct xfrm_algo_desc *xfrm_ealg_get_byid(int alg_id)
 {
 	return xfrm_find_algo(&xfrm_ealg_list, xfrm_alg_id_match,
@@ -758,28 +763,38 @@ void xfrm_probe_algs(void)
 
 	BUG_ON(in_softirq());
 
+	// 遍历认证算法数组
 	for (i = 0; i < aalg_entries(); i++) {
+		// 根据算法名称确定该HASH算法是否存在, 返回0不存在, 非0存在
 		status = crypto_has_hash(aalg_list[i].name, 0,
 					 CRYPTO_ALG_ASYNC);
+		// 如果状态和原来的状态不同, 更改
 		if (aalg_list[i].available != status)
 			aalg_list[i].available = status;
 	}
 
+	// 遍历加密算法数组
 	for (i = 0; i < ealg_entries(); i++) {
+		// 根据算法名称确定该加密算法是否存在, 返回0不存在, 非0存在
 		status = crypto_has_ablkcipher(ealg_list[i].name, 0, 0);
+		// 如果状态和原来的状态不同, 更改
 		if (ealg_list[i].available != status)
 			ealg_list[i].available = status;
 	}
 
+	// 遍历压缩算法数组
 	for (i = 0; i < calg_entries(); i++) {
+		// 根据算法名称确定该压缩算法是否存在, 返回0不存在, 非0存在
 		status = crypto_has_comp(calg_list[i].name, 0,
 					 CRYPTO_ALG_ASYNC);
+		// 如果状态和原来的状态不同, 更改
 		if (calg_list[i].available != status)
 			calg_list[i].available = status;
 	}
 }
 EXPORT_SYMBOL_GPL(xfrm_probe_algs);
 
+// 统计可用的认证算法数量, 就是available的认证算法数量累加
 int xfrm_count_pfkey_auth_supported(void)
 {
 	int i, n;
@@ -791,6 +806,7 @@ int xfrm_count_pfkey_auth_supported(void)
 }
 EXPORT_SYMBOL_GPL(xfrm_count_pfkey_auth_supported);
 
+// 统计可用的加密算法数量, 就是available的加密算法数量累加
 int xfrm_count_pfkey_enc_supported(void)
 {
 	int i, n;

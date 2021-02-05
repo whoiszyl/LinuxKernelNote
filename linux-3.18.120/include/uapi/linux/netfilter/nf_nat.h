@@ -33,9 +33,9 @@ struct nf_nat_ipv4_multi_range_compat {
 
 struct nf_nat_range {
 	unsigned int			flags;
-	union nf_inet_addr		min_addr;
+	union nf_inet_addr		min_addr;//IPµØÖ··¶Î§
 	union nf_inet_addr		max_addr;
-	union nf_conntrack_man_proto	min_proto;
+	union nf_conntrack_man_proto	min_proto;//¶Ë¿Ú·¶Î§
 	union nf_conntrack_man_proto	max_proto;
 };
 

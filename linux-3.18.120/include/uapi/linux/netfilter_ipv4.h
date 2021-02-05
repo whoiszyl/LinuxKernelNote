@@ -42,14 +42,19 @@
 
 /* IP Hooks */
 /* After promisc drops, checksum checks. */
+//在完整性校验之后，选路确定之前
 #define NF_IP_PRE_ROUTING	0
 /* If the packet is destined for this box. */
+//在选路确定之后，且数据包的目的是本地主机
 #define NF_IP_LOCAL_IN		1
 /* If the packet is destined for another interface. */
+//目的地是其它主机地数据包
 #define NF_IP_FORWARD		2
 /* Packets coming from a local process. */
+//来自本机进程的数据包在其离开本地主机的过程中
 #define NF_IP_LOCAL_OUT		3
 /* Packets about to hit the wire. */
+//在数据包离开本地主机“上线”之前
 #define NF_IP_POST_ROUTING	4
 #define NF_IP_NUMHOOKS		5
 #endif /* ! __KERNEL__ */
