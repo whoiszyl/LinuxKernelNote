@@ -20,10 +20,10 @@ enum {
 	TCP_FIN_WAIT1,
 	TCP_FIN_WAIT2,
 	TCP_TIME_WAIT,
-	TCP_CLOSE,
+	TCP_CLOSE, //如果套接字状态不是TCP_CLOSE(套接字的初始状态，参见sock_init_data()函数)
 	TCP_CLOSE_WAIT,
 	TCP_LAST_ACK,
-	TCP_LISTEN,
+	TCP_LISTEN, //在应用程序绑定的时候，如果端口已经被使用，并且处于这个状态，会绑定失败，见inet_csk_get_port
 	TCP_CLOSING,	/* Now a valid state */
 	TCP_NEW_SYN_RECV,
 

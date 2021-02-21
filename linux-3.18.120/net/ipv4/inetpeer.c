@@ -380,6 +380,12 @@ static void unlink_from_pool(struct inet_peer *p, struct inet_peer_base *base,
 }
 
 /* perform garbage collect on all items stacked during a lookup */
+/*
+ * 用来检测inet_peer_unused_head队列中
+ * 第一个闲置的对端信息块，一旦检测到
+ * 该对端信息块闲置时间达到阈值，即将
+ * 其释放。
+ */
 static int inet_peer_gc(struct inet_peer_base *base,
 			struct inet_peer __rcu **stack[PEER_MAXDEPTH],
 			struct inet_peer __rcu ***stackptr)
@@ -416,6 +422,13 @@ static int inet_peer_gc(struct inet_peer_base *base,
 	return cnt;
 }
 
+/*
+ * 对端信息块的创建和查找都是通过inet_getpeer()来实现的，
+ * 由参数create来区分是创建还是查找。首先检查指定地址
+ * 的对端信息块，如果查找命中，则返回查找的结果，
+ * 否则，当create为0时返回NULL，非0时创建新的对端
+ * 信息块并添加到AVL树中，并返回该新创建的对端信息块。
+ */
 struct inet_peer *inet_getpeer(struct inet_peer_base *base,
 			       const struct inetpeer_addr *daddr,
 			       int create)

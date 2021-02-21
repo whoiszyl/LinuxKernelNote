@@ -633,6 +633,7 @@ out_fail:
 }
 
 /* Process an incoming IP datagram fragment. */
+//IP碎片重组
 int ip_defrag(struct sk_buff *skb, u32 user)
 {
 	struct ipq *qp;//ip碎片队列

@@ -9,6 +9,10 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+/* nf_conntrack_expect.c文件中的nf_ct_expect_related_report(struct nf_conntrack_expect *expect, u32 pid, int report)来注册nf_conntrack_expect结构。
+ * 期望连接是指对于那些活动协议而言，例如对FTP协议，FTP协议的连接分为控制连接和数据连接，对于这种类型的协议，连接跟踪认为这两次连接应该归结到一个跟踪里，这样，当FTP的控制连接建立起来后，它的数据连接就是控制连接的期望连接，而数据连接就是控制连接的master。期望连接可用如下的数据结构表示：
+ * 参考:http://blog.csdn.net/ye_shizhe/article/details/17331947
+*/
 
 #include <linux/types.h>
 #include <linux/netfilter.h>
@@ -31,6 +35,13 @@
 #include <net/netfilter/nf_conntrack_helper.h>
 #include <net/netfilter/nf_conntrack_tuple.h>
 #include <net/netfilter/nf_conntrack_zones.h>
+
+
+/*
+ nf_conntrack_expect.c文件中的nf_ct_expect_related_report(struct nf_conntrack_expect *expect, u32 pid, int report)来注册nf_conntrack_expect结构。
+ 期望连接是指对于那些活动协议而言，例如对FTP协议，FTP协议的连接分为控制连接和数据连接，对于这种类型的协议，连接跟踪认为这两次连接应该归结到一个跟踪里，这样，当FTP的控制连接建立起来后，它的数据连接就是控制连接的期望连接，而数据连接就是控制连接的master。期望连接可用如下的数据结构表示：
+ 参考:http://blog.csdn.net/ye_shizhe/article/details/17331947
+*/
 
 unsigned int nf_ct_expect_hsize __read_mostly;
 EXPORT_SYMBOL_GPL(nf_ct_expect_hsize);
@@ -72,6 +83,7 @@ static void nf_ct_expectation_timed_out(unsigned long ul_expect)
 	nf_ct_expect_put(exp);
 }
 
+//计算orig_tuple在net.ct->expect_hash[]的键值
 static unsigned int nf_ct_expect_dst_hash(const struct nf_conntrack_tuple *tuple)
 {
 	unsigned int hash;
@@ -126,6 +138,7 @@ EXPORT_SYMBOL_GPL(nf_ct_expect_find_get);
 
 /* If an expectation for this connection is found, it gets delete from
  * global list then returned. */
+//使用orig_tuple在net.ct->expect_hash[]桶里面查找expect项
 struct nf_conntrack_expect *
 nf_ct_find_expectation(struct net *net, u16 zone,
 		       const struct nf_conntrack_tuple *tuple)
@@ -261,6 +274,7 @@ struct nf_conntrack_expect *nf_ct_expect_alloc(struct nf_conn *me)
 }
 EXPORT_SYMBOL_GPL(nf_ct_expect_alloc);
 
+//构建一个nf_conntrack_expect结构
 void nf_ct_expect_init(struct nf_conntrack_expect *exp, unsigned int class,
 		       u_int8_t family,
 		       const union nf_inet_addr *saddr,
@@ -327,6 +341,7 @@ static void nf_ct_expect_free_rcu(struct rcu_head *head)
 	kmem_cache_free(nf_ct_expect_cachep, exp);
 }
 
+//如果exp->use为0，则释放exp
 void nf_ct_expect_put(struct nf_conntrack_expect *exp)
 {
 	if (atomic_dec_and_test(&exp->use))
@@ -435,6 +450,7 @@ out:
 	return ret;
 }
 
+//将expect挂载到net->ct.expect_hash	
 int nf_ct_expect_related_report(struct nf_conntrack_expect *expect,
 				u32 portid, int report)
 {

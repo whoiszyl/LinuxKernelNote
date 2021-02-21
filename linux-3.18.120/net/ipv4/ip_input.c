@@ -187,6 +187,16 @@ bool ip_call_ra_chain(struct sk_buff *skb)
 	return false;
 }
 
+//从这里进入L4传输层
+/*
+ * ip_local_deliver_finish()将输入数据包从网络层传递
+ * 到传输层。过程如下:
+ * 1)首先，在数据包传递给传输层之前，去掉IP首部
+ * 2)接着，如果是RAW套接字接收数据包，则需要
+ * 复制一份副本，输入到接收该数据包的套接字。
+ * 3)最后，通过传输层的接收例程，将数据包传递
+ * 到传输层，由传输层进行处理。
+ */
 static int ip_local_deliver_finish(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb->dev);
@@ -202,8 +212,23 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
 		int raw;
 
 	resubmit:
-		 /* 处理RAW IP */
-		raw = raw_local_deliver(skb, protocol);
+		/*
+		 * 处理RAW套接字，先根据传输层协议号
+		 * 得到哈希值，然后查看raw_v4_htable散列表
+		 * 中以该值为关键字的哈希桶是否为空，
+		 * 如果不为空，则说明创建了RAW套接字，
+		 * 复制该数据包的副本输入到注册到
+		 * 该桶中的所有套接字。
+		 */
+		/*
+		 * ip_local_deliver_finish函数会先检查哈希表raw_v4_htable。因为在创建 socket时，inet_create会把协议号IPPROTO_ICMP的值赋给socket的成员num，
+		 * 并以num为键值，把socket存入哈 项表raw_v4_htable，raw_v4_htable[IPPROTO_ICMP&(MAX_INET_PROTOS-1)]上即存放了 这个socket，实际上是一个socket的链表，
+		 * 如果其它还有socket要处理这个回显应答，也会被放到这里，组成一个链 表，ip_local_deliver_finish收到数据报后，取出这个socket链表(目前实际上只有一项)，
+		 * 调用raw_v4_input，把 skb交给每一个socket进行处理。然后，还需要把数据报交给inet_protos[IPPROTO_ICMP& (MAX_INET_PROTOS-1)]，即icmp_rcv处理，
+		 * 因为对于icmp报文，每一个都是需要经过协议栈处理的，但对回显应 答，icmp_rcv只是简单丢弃，并未实际处理。
+		 */
+		 ////之前开巨帧的时候，icmp不通就是在这里面的函数中sock_queue_rcv_skb丢的
+		raw = raw_local_deliver(skb, protocol); //如果是raw套接字，则则该函数里面会复制一份skb，然后送到，例如用ping 1.2.2.2的时候，会走这里面，不会走icmp_recv
 
 		/* 从inet_protos数组中取出对应的net_protocol元素，TCP的为tcp_protocol */
 		ipprot = rcu_dereference(inet_protos[protocol]);
@@ -226,6 +251,12 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
 			}
 			IP_INC_STATS_BH(net, IPSTATS_MIB_INDELIVERS);
 		} else {
+			/*
+			 * 如果没有响应的协议传输层接收该数据包，
+			 * 则释放该数据包。在释放前，如果是RAW
+			 * 套接字没有接收或接收异常，则还需产生
+			 * 一个目的不可达ICMP报文给发送方。表示该包raw没有接收并且inet_protos中没有注册该协议
+			 */
 			if (!raw) {
 				if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
 					IP_INC_STATS_BH(net, IPSTATS_MIB_INUNKNOWNPROTOS);
@@ -260,12 +291,33 @@ int ip_local_deliver(struct sk_buff *skb)
      * 后还有更多分片，最后一个IP分片未置位IP_MF但是其offset是非0。
      * 如果是一个IP分片，则调用ip_defrag重新组织IP数据包。
      */
-
+        /* 
+         * frag_off是16位，其中高3位用作标志位，
+         * 低13位才是真正的偏移量.
+         * 内核可通过设置的分片标识位或非0
+         * 的分片偏移量识别分片的分组。偏移
+         * 量字段为0，表明这是分组的最后一个分片。
+         * 
+         * 如果接收到的IP数据包时分片，则调用
+         * ip_defrag()进行重组，其标志位IP_DEFRAG_LOCAL_DELIVER。
+         */
 	if (ip_is_fragment(ip_hdr(skb))) {
+       /*
+        * 重新组合分片分组的各个部分。
+        * 
+        * 如果ip_defrag()返回非0，则表示IP数据包分片
+        * 尚未到齐，重组没有完成，或者出错，直接
+        * 返回。为0，则表示已完成IP数据包的重组，
+        * 需要传递到传输层进行处理。
+        */
 		if (ip_defrag(skb, IP_DEFRAG_LOCAL_DELIVER))
 			return 0;
 	}
 
+    /*
+     * 经过netfilter处理后，调用ip_local_deliver_finish()，
+     * 将组装完成的IP数据包传送到传输层处理
+     */
 	return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN, skb, skb->dev, NULL,
 		       ip_local_deliver_finish);
 }
@@ -322,6 +374,14 @@ drop:
 int sysctl_ip_early_demux __read_mostly = 1;
 EXPORT_SYMBOL(sysctl_ip_early_demux);
 
+/*
+ * ip_rcv_finish()在ip_rcv()中当IP数据包经过netfilter模块
+ * 处理后被调用。完成的主要功能是，如果
+ * 还没有为该数据包查找输入路由缓存，则
+ * 调用ip_route_input()为其查找输入路由缓存。
+ * 接着处理IP数据包首部中的选项，最后
+ * 根据输入路由缓存输入到本地或抓发。
+ */
 static int ip_rcv_finish(struct sk_buff *skb)
 {
 	//根据套接字获得ip头
@@ -350,8 +410,9 @@ static int ip_rcv_finish(struct sk_buff *skb)
      //ip_route_input_noref查找路由信息
      //(kernel/include/net/route.h)ip_route_input_noref()--->(kernel/net/route.c)ip_route_input_common()
 	if (!skb_dst(skb)) {
+		/* 选择路由*/
 		int err = ip_route_input_noref(skb, iph->daddr, iph->saddr,
-					       iph->tos, skb->dev);
+					       iph->tos, skb->dev);//最终会调用ip_local_deliver
 		if (unlikely(err)) {
 			if (err == -EXDEV)
 				//更新基于tcp/ip因特网的MIB（management information base）信息，RFC1213

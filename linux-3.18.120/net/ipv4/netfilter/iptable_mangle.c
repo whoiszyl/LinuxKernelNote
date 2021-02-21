@@ -22,6 +22,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
 MODULE_DESCRIPTION("iptables mangle table");
 
+//iptable的三个mange filter nat表的内核对应hook为MANGLE_VALID_HOOKS  FILTER_VALID_HOOKS   NAT_VALID_HOOKS
 #define MANGLE_VALID_HOOKS ((1 << NF_INET_PRE_ROUTING) | \
 			    (1 << NF_INET_LOCAL_IN) | \
 			    (1 << NF_INET_FORWARD) | \

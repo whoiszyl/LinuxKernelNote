@@ -64,7 +64,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
-
+//PF_INET协议族相关参考http://jianshu.io/p/5d82a685b5b6可以知道应用层创建PF_INET socket过程中内核函数调用情况
 #define pr_fmt(fmt) "IPv4: " fmt
 
 #include <linux/err.h>
@@ -123,7 +123,8 @@
 /* The inetsw table contains everything that inet_create needs to
  * build a new socket.
  */
-static struct list_head inetsw[SOCK_MAX];
+//当应用程序通过socket函数创建套接字的时候，通过协议类型protocol和套接字type在inet_create里面的inetsw中查找到对应的tcp_proto udp_proto raw_proto等
+static struct list_head inetsw[SOCK_MAX];//见inet_init  inet_register_protosw(q); inetsw_array中的信息存放在该链表中的protocol，然后让struct socket的ops等指向对应的协议
 static DEFINE_SPINLOCK(inetsw_lock);
 
 /* New destruction routine */
@@ -198,6 +199,11 @@ int inet_listen(struct socket *sock, int backlog)
 	lock_sock(sk);
 
 	err = -EINVAL;
+	/*
+	 * 检测调用listen的套接字的当前状态和类型。如果套接字状态
+	 * 不是SS_UNCONNECTED，或套接字类型不是SOCK_STREAM，则不
+	 * 允许进行监听操作，返回相应错误码
+	 */
 	if (sock->state != SS_UNCONNECTED || sock->type != SOCK_STREAM)
 		goto out;
 
@@ -247,7 +253,8 @@ EXPORT_SYMBOL(inet_listen);
 /*
  *	Create an inet socket.
  */
-
+//pf_inet的net_families[]为inet_family_ops，对应的套接口层ops参考inetsw_array中的inet_stream_ops inet_dgram_ops inet_sockraw_ops，传输层操作集分别为tcp_prot udp_prot raw_prot
+//netlink的net_families[]netlink_family_ops，对应的套接口层ops为netlink_ops
 static int inet_create(struct net *net, struct socket *sock, int protocol,
 		       int kern)
 {
@@ -262,7 +269,7 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 	if (protocol < 0 || protocol >= IPPROTO_MAX)
 		return -EINVAL;
 
-	sock->state = SS_UNCONNECTED;
+	sock->state = SS_UNCONNECTED;//设置socket的状态为SS_UNCONNECTED；
 
 	/* Look for the requested type/protocol pair. */
 lookup_protocol:
@@ -312,6 +319,11 @@ lookup_protocol:
 	err = -EPERM;
 	if (sock->type == SOCK_RAW && !kern &&
 	    !ns_capable(net->user_ns, CAP_NET_RAW))
+	/*
+	 * 检查网络命名空间，检查指定的协议类型
+	 * 是否已经添加，参见init_inet()，tcp协议对应
+	 * 的net_protocol实例是tcp_protocol。
+	 */
 		goto out_rcu_unlock;
 
 	sock->ops = answer->ops;
@@ -322,6 +334,10 @@ lookup_protocol:
 	WARN_ON(answer_prot->slab == NULL);
 
 	err = -ENOBUFS;
+	/*
+	 * 分配sock实例并初始化，如果是TCP协议，
+	 * 则实际分配的大小为sizeof(tcp_sock)。
+	 */
 	sk = sk_alloc(net, PF_INET, GFP_KERNEL, answer_prot);
 	if (sk == NULL)
 		goto out;
@@ -392,6 +408,7 @@ out_rcu_unlock:
  *	The peer socket should always be NULL (or else). When we call this
  *	function we are destroying the object and from then on nobody
  *	should refer to it.
+ *	从sock_release走到这里，见sock_release
  */
 int inet_release(struct socket *sock)
 {
@@ -413,6 +430,11 @@ int inet_release(struct socket *sock)
 		 * linger..
 		 */
 		timeout = 0;
+		/*
+		 * 如果设置了SO_LINGER选项，则关闭连接的时候会等待
+		 * 关闭完成，否则会立即返回。但是如果是进程退出，
+		 * 则会忽略SO_LINGER选项
+		 */
 		if (sock_flag(sk, SOCK_LINGER) &&
 		    !(current->flags & PF_EXITING))
 			timeout = sk->sk_lingertime;
@@ -434,6 +456,11 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	int err;
 
 	/* If the socket has its own bind function then use it. (RAW) */
+	/*
+	 * 如果是TCP套接字，sk->sk_prot指向的是tcp_prot，在
+	 * inet_create()中调用的sk_alloc()函数中初始化。由于
+	 * tcp_prot中没有设置bind接口，因此判断条件不成立。 现在只有RAW才有
+	 */
 	if (sk->sk_prot->bind) {
 		err = sk->sk_prot->bind(sk, uaddr, addr_len);
 		goto out;
@@ -472,7 +499,10 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 
 	snum = ntohs(addr->sin_port);
 	err = -EACCES;
-	if (snum && snum < PROT_SOCK &&
+	/*
+	 * 如果绑定的端口号小于1024(保留端口号)，但是
+	 * 当前用户没有CAP_NET_BIND_SERVICE权限，则返回EACCESS错误。
+	 */
 	    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE))
 		goto out;
 
@@ -486,6 +516,10 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	lock_sock(sk);
 
 	/* Check these errors (active socket, double bind). */
+	/*
+	 * 如果套接字状态不是TCP_CLOSE(套接字的初始状态，参见
+	 * sock_init_data()函数)，或者已经绑定过，则返回EINVAL错误。
+	 */
 	err = -EINVAL;
 	if (sk->sk_state != TCP_CLOSE || inet->inet_num)
 		goto out_release_sock;
@@ -589,7 +623,7 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		err = -EALREADY;
 		/* Fall out of switch with err, set for this state */
 		break;
-	case SS_UNCONNECTED:
+	case SS_UNCONNECTED://只有在这个状态下才能进行连接
 		err = -EISCONN;
 		if (sk->sk_state != TCP_CLOSE)
 			goto out;
@@ -627,7 +661,7 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	/* Connection was closed by RST, timeout, ICMP error
 	 * or another process disconnected us.
 	 */
-	if (sk->sk_state == TCP_CLOSE)
+	if (sk->sk_state == TCP_CLOSE) //在前面的sk->sk_prot->connect过程中，这个状态会根据实际情况变化
 		goto sock_error;
 
 	/* sk->sk_err may be not zero now, if RECVERR was ordered by user
@@ -669,7 +703,12 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 {
 	struct sock *sk1 = sock->sk;
 	int err = -EINVAL;
-	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err);
+
+	/*
+	 * 调用accept的传输层接口实现inet_csk_accept()获取已完成
+	 * 连接(被接受)的传输控制块,这是在三次握手的时候，会创建一个传输控制块
+	 */
+	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err);//这个是inet_csk_accept的时候从reqsk_queue_get_child队列中取出来的，是三次握手第三步的时候开辟的sk空间
 
 	if (!sk2)
 		goto do_err;
@@ -680,7 +719,10 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 	WARN_ON(!((1 << sk2->sk_state) &
 		  (TCPF_ESTABLISHED | TCPF_SYN_RECV |
 		  TCPF_CLOSE_WAIT | TCPF_CLOSE)));
-
+    /*
+	 * 如果accept成功，则需调用sock_graft()把子套接字和传输控制块关联
+	 * 起来以便这两者之间相互索引
+	 */
 	sock_graft(sk2, newsock);
 
 	newsock->state = SS_CONNECTED;
@@ -694,7 +736,7 @@ EXPORT_SYMBOL(inet_accept);
 
 /*
  *	This does both peername and sockname.
- */
+ */ //获取本端或者对端的地址和端口   peer=1获取对端的，peer=0获取本端的
 int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 			int *uaddr_len, int peer)
 {
@@ -852,16 +894,21 @@ int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case SIOCGSTAMPNS:
 		err = sock_get_timestampns(sk, (struct timespec __user *)arg);
 		break;
+		/* 添加 删除 路由操作 */
 	case SIOCADDRT:
 	case SIOCDELRT:
 	case SIOCRTMSG:
 		err = ip_rt_ioctl(net, cmd, (void __user *)arg);
 		break;
+
+		//ARP添加 删除 设置
 	case SIOCDARP:
 	case SIOCGARP:
 	case SIOCSARP:
 		err = arp_ioctl(net, cmd, (void __user *)arg);
 		break;
+
+		/* DEV设备接口操作 */
 	case SIOCGIFADDR:
 	case SIOCSIFADDR:
 	case SIOCGIFBRDADDR:
@@ -875,7 +922,8 @@ int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case SIOCSIFFLAGS:
 		err = devinet_ioctl(net, cmd, (void __user *)arg);
 		break;
-	default:
+		
+	default://对具体的某个协议的套接口ioctl操作
 		if (sk->sk_prot->ioctl)
 			err = sk->sk_prot->ioctl(sk, cmd, arg);
 		else
@@ -899,6 +947,7 @@ static int inet_compat_ioctl(struct socket *sock, unsigned int cmd, unsigned lon
 }
 #endif
 
+//TCP协议z在INET层操作集inet_stream_ops
 const struct proto_ops inet_stream_ops = {
 	.family		   = PF_INET,
 	.owner		   = THIS_MODULE,
@@ -909,10 +958,10 @@ const struct proto_ops inet_stream_ops = {
 	.accept		   = inet_accept,
 	.getname	   = inet_getname,
 	.poll		   = tcp_poll,
-	.ioctl		   = inet_ioctl,
+	.ioctl		   = inet_ioctl, //通过sock_do_ioctl走到这里
 	.listen		   = inet_listen,
 	.shutdown	   = inet_shutdown,
-	.setsockopt	   = sock_common_setsockopt,
+	.setsockopt	   = sock_common_setsockopt, //解析应用程序的setsockopt，并内核生效
 	.getsockopt	   = sock_common_getsockopt,
 	.sendmsg	   = inet_sendmsg,
 	.recvmsg	   = inet_recvmsg,
@@ -927,6 +976,7 @@ const struct proto_ops inet_stream_ops = {
 };
 EXPORT_SYMBOL(inet_stream_ops);
 
+//UDP协议在INET层操作集inet_dgram_ops
 const struct proto_ops inet_dgram_ops = {
 	.family		   = PF_INET,
 	.owner		   = THIS_MODULE,
@@ -984,7 +1034,12 @@ static const struct proto_ops inet_sockraw_ops = {
 #endif
 };
 
-static const struct net_proto_family inet_family_ops = {
+////ops->create在应用程序创建套接字的时候，引起系统调用，从而在函数__sock_create中执行ops->create  netlink为netlink_family_ops
+//应用层创建套接字的时候，内核系统调用sock_create，然后执行该函数
+////pf_inet的net_families[]为inet_family_ops，对应的套接口层ops参考inetsw_array中的inet_stream_ops inet_dgram_ops inet_sockraw_ops，传输层操作集分别为tcp_prot udp_prot raw_prot
+//netlink的net_families[]netlink_family_ops，对应的套接口层ops为netlink_ops
+//family协议族通过sock_register注册  传输层接口tcp_prot udp_prot netlink_prot等通过proto_register注册   IP层接口通过inet_add_protocol(&icmp_protocol等注册 ，这些组成过程参考inet_init函数
+static const struct net_proto_family inet_family_ops = {//操作集参考inetsw_array  
 	.family = PF_INET,
 	.create = inet_create,
 	.owner	= THIS_MODULE,
@@ -992,14 +1047,27 @@ static const struct net_proto_family inet_family_ops = {
 
 /* Upon startup we insert all the elements in inetsw_array[] into
  * the linked list inetsw.
- */
-static struct inet_protosw inetsw_array[] =
+ 在初始化的时候我们会将上面数组中的的元素按套接字类型插入static struct list_head inetsw[SOCK_MAX];链表数组中
+ */  //参见樊东东P211 
+ /* 
+  * inetsw_array数组包含三个inet_protosw结构的实例，分别对应
+  * TCP、UDP和原始套接字。在Internet协议族初始化函数inet_init()中
+  * 调用inet_register_protosw()将inetsw_array数组中
+  * 的inet_protosw结构实例，以其type值为key组织到散列表inetsw中，
+  * 也就是说各协议族中type值相同而protocol值不同的inet_protosw结构
+  * 实例，在inetsw散列表中以type为关键字连接成链表，通过inetsw
+  * 散列表可以找到所有协议族的inet_protosw结构实例。
+  */ ////ipv4_specific是TCP传输层到网络层数据发送以及TCP建立过程的真正OPS，在tcp_prot->init中被赋值给inet_connection_sock->icsk_af_ops
+static struct inet_protosw inetsw_array[] =   //这个和应用层创建套接字相关，个人我理解是属于套接口层,为了把套接口层和传输层衔接起来(tcp_protocol udp_protol icmp_protocol)
 {
-	{
-		.type =       SOCK_STREAM,
+	{  
+		.type =       SOCK_STREAM, //在inet_create的时候，用它做为关键字，把下面这几个成员联系在一起
 		.protocol =   IPPROTO_TCP,
-		.prot =       &tcp_prot,
-		.ops =        &inet_stream_ops,
+
+    //tcp_prot udp proto raw_proto头添加到的proto_list中，通过遍历该链表就可以知道有哪些传输层协议添加到该链表中
+//协议最终都是通过inet_init中的proto_register添加到proto_list链表中的。family协议族通过sock_register注册  传输层接口tcp_prot udp_prot netlink_prot等通过proto_register注册   IP层接口通过inet_add_protocol(&icmp_protocol等注册 ，这些组成过程参考inet_init函数
+		.prot =       &tcp_prot,//传输层操作集  在inet_create中的sk_alloc中赋值  先执行ops中的函数，然后执行prot中对应的函数 proto结构为网络接口层，结构中的操作实现传输层的操作和从传输层到网络层调用的跳转，在proto结构中的某些成员跟proto_ops结构中的成员对应，比如connect()等
+		.ops =        &inet_stream_ops,//套接口层操作集,也就是协议族操作集 用来区分协议族(netlink family(ops为netlink_ops)或者 inet family)  ops在创建套接字的时候被赋值，例如netlink赋值的地方在__netlink_create  pf_net赋值的地方在inet_create中
 		.flags =      INET_PROTOSW_PERMANENT |
 			      INET_PROTOSW_ICSK,
 	},
@@ -1007,8 +1075,8 @@ static struct inet_protosw inetsw_array[] =
 	{
 		.type =       SOCK_DGRAM,
 		.protocol =   IPPROTO_UDP,
-		.prot =       &udp_prot,
-		.ops =        &inet_dgram_ops,
+		.prot =       &udp_prot,//传输层操作集  在inet_create中的sk_alloc中赋值  先执行ops中的函数，然后执行prot中对应的函数
+		.ops =        &inet_dgram_ops,//套接口层操作集 用来区分协议族(netlink family(ops为netlink_ops)或者 inet family)  ops在创建套接字的时候被赋值，例如netlink赋值的地方在__netlink_create  pf_net赋值的地方在inet_create中
 		.flags =      INET_PROTOSW_PERMANENT,
        },
 
@@ -1021,16 +1089,19 @@ static struct inet_protosw inetsw_array[] =
        },
 
        {
-	       .type =       SOCK_RAW,
+	       .type =       SOCK_RAW,  //原始套接口
 	       .protocol =   IPPROTO_IP,	/* wild card */
-	       .prot =       &raw_prot,
-	       .ops =        &inet_sockraw_ops,
+	       .prot =       &raw_prot,//传输层操作集  在inet_create中的sk_alloc中赋值  先执行ops中的函数，然后执行prot中对应的函数
+	       .ops =        &inet_sockraw_ops,//套接口层操作集  用来区分协议族(netlink family(ops为netlink_ops)或者 inet family)  ops在创建套接字的时候被赋值，例如netlink赋值的地方在__netlink_create  pf_net赋值的地方在inet_create中
 	       .flags =      INET_PROTOSW_REUSE,
        }
 };
 
 #define INETSW_ARRAY_LEN ARRAY_SIZE(inetsw_array)
-
+/*
+inet_register_protosw把数组inetsw_array中定义的套接字类型全部注册到inetsw数组中；其中相同套接字类型，不同协议类型的套接字
+通过链表存放在到inetsw数组中，以套接字类型为索引，在系统实际使用的时候，只使用inetsw，而不使用 inetsw_array；
+*/
 void inet_register_protosw(struct inet_protosw *p)
 {
 	struct list_head *lh;
@@ -1202,6 +1273,12 @@ int inet_sk_rebuild_header(struct sock *sk)
 }
 EXPORT_SYMBOL(inet_sk_rebuild_header);
 
+/*
+ * inet_gso_segment()是IP层gso_segment接口的实现函数，根据
+ * 分段数据包获取对应的传输层接口，并完成GSO
+ * 分段后，对分段后的IP数据包重新计算校验和。
+ */
+
 static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 					netdev_features_t features)
 {
@@ -1215,6 +1292,10 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	int ihl;
 	int id;
 
+	/*
+	 * 检验待软GSO分段的SKB，其gsotype是否
+	 * 存在其他非法的值。
+	 */
 	if (unlikely(skb_shinfo(skb)->gso_type &
 		     ~(SKB_GSO_TCPV4 |
 		       SKB_GSO_UDP |
@@ -1233,9 +1314,16 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 
 	skb_reset_network_header(skb);
 	nhoff = skb_network_header(skb) - skb_mac_header(skb);
+	/*
+	 * 待分段数据包长度至少大于IP首部长度，
+	 * 否则必定是无效IP数据包。
+	 */
 	if (unlikely(!pskb_may_pull(skb, sizeof(*iph))))
 		goto out;
 
+	/*
+	 * 检测IP首部中长度字段是否有效。
+	 */
 	iph = ip_hdr(skb);
 	ihl = iph->ihl * 4;
 	if (ihl < sizeof(*iph))
@@ -1245,8 +1333,19 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	proto = iph->protocol;
 
 	/* Warning: after this point, iph might be no longer valid */
+	/*
+	 * 再次通过IP首部中长度字段检测
+	 * IP数据包长度是否有效。
+	 */
 	if (unlikely(!pskb_may_pull(skb, ihl)))
 		goto out;
+
+	/*
+	 * 取出IP首部中ID字段值，用于分片数据包
+	 * 的IP首部中ID的基础值。取出IP首部中的
+	 * 协议字段值，用于定位与之对应的传输
+	 * 层协议接口。
+	 */
 	__skb_pull(skb, ihl);
 
 	encap = SKB_GSO_CB(skb)->encap_level > 0;
@@ -1264,9 +1363,17 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	else
 		udpfrag = proto == IPPROTO_UDP && !skb->encapsulation;
 
+	/*
+	 * 根据IP首部中协议字段值，获取对应的
+	 * 传输层协议接口，然后通过gso_segment接口
+	 * (参见tcp_tso_segment())，对TCP段进行软GSO分段，
+	 * 分段得到的新段通过next链表在原先的段
+	 * 之后。
+	 */
+	 
 	ops = rcu_dereference(inet_offloads[proto]);
-	if (likely(ops && ops->callbacks.gso_segment))
-		segs = ops->callbacks.gso_segment(skb, features);
+	if (likely(ops && ops->callbacks.gso_segment))//icmp_protocol、udp_protocol、tcp_protocol和igmp_protocol
+		segs = ops->callbacks.gso_segment(skb, features);//分段得到的新段通过next链表在原先的段之后
 
 	if (IS_ERR_OR_NULL(segs))
 		goto out;
@@ -1291,6 +1398,10 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	} while ((skb = skb->next));
 
 out:
+	/*
+	 * 最后，如果分段成功，则返回分段后SKB链表
+	 * 中的第一个SKB，否则返回相应的错误码。
+	 */
 	return segs;
 }
 
@@ -1546,16 +1657,21 @@ static const struct net_protocol igmp_protocol = {
 };
 #endif
 
-static const struct net_protocol tcp_protocol = {
+////ipv4_specific是TCP传输层到网络层数据发送以及TCP建立过程的真正OPS，在tcp_prot->init中被赋值给inet_connection_sock->icsk_af_ops
+////这里面有每种协议传输层的接收函数，后面的inetsw_array那几行是套接口层的相关函数  在函数中执行handler,见函数ip_local_deliver_finish
+//family协议族通过sock_register注册  传输层接口tcp_prot udp_prot netlink_prot等通过proto_register注册   IP层接口通过inet_add_protocol(&icmp_protocol等注册 ，这些组成过程参考inet_init函数
+
+//IP层处理完后(包括ip_local_deliver_finish和icmp_unreach)，走到这里，这是IP层和传输层的邻借口，然后在由这里走到tcp_prot udp_prot raw_prot
+static const struct net_protocol tcp_protocol = { //这些是传输层的接收处理过程，传输层和套接口层的处理过程需要使用udp_prot tcp_prot raw_prot过渡到socket层，处理过程参考inetsw_array
 	.early_demux	=	tcp_v4_early_demux,
-	.handler	=	tcp_v4_rcv,
-	.err_handler	=	tcp_v4_err,
+	.handler =	tcp_v4_rcv,  //当接收到报文后，ip层处理完后在ip_local_deliver_finish 函数中ret = ipprot->handler(skb);走到这里          //从这里面跳转到tcp_prot
+	.err_handler =	tcp_v4_err, //icmp_unreach当收到ICMP差错报文后，如果引起差错的是TCP包就走到该函数
 	.no_policy	=	1,
 	.netns_ok	=	1,
 	.icmp_strict_tag_validation = 1,
 };
-
-static const struct net_protocol udp_protocol = {
+//这几个是接收的过程处理
+static const struct net_protocol udp_protocol = { //在函数中执行handler,见函数ip_local_deliver_finish
 	.early_demux =	udp_v4_early_demux,
 	.handler =	udp_rcv,
 	.err_handler =	udp_err,
@@ -1563,12 +1679,22 @@ static const struct net_protocol udp_protocol = {
 	.netns_ok =	1,
 };
 
-static const struct net_protocol icmp_protocol = {
+static const struct net_protocol icmp_protocol = {//在函数中执行handler,见函数ip_local_deliver_finish
 	.handler =	icmp_rcv,
 	.err_handler =	icmp_err,
 	.no_policy =	1,
 	.netns_ok =	1,
 };
+
+/*
+上面几个结构体中的err_handler的解释如下:
+ * 目的不可达、源端被关闭、超时、参数错误这四种类型
+ * 的差错ICMP报文，都是由同一个函数icmp_unreach()来处理的，
+ * 对其中目的不可达、源端被关闭这两种类型ICMP报文
+ * 因要提取某些信息而需作一些特殊的处理，而另外
+ * 一些则不需要，根据差错报文中的信息直接调用
+ * 传输层的错误处理例程。参见<Linux内核源码剖析348页>
+ */
 
 static __net_init int ipv4_mib_init_net(struct net *net)
 {
@@ -1684,9 +1810,13 @@ static int ipv4_proc_init(void);
  */
 
 static struct packet_offload ip_packet_offload __read_mostly = {
+    /* 
+        * 由于类型不是ETH_P_ALL，所以ip_packet_type
+        * 会被添加到ptype_base链表中，参见dev_add_pack
+        */
 	.type = cpu_to_be16(ETH_P_IP),
 	.callbacks = {
-		.gso_segment = inet_gso_segment,
+		.gso_segment = inet_gso_segment,//使用的地方在skb_gso_segment
 		.gro_receive = inet_gro_receive,
 		.gro_complete = inet_gro_complete,
 	},
@@ -1722,7 +1852,11 @@ static struct packet_type ip_packet_type __read_mostly = {
 	.func = ip_rcv,
 };
 
-static int __init inet_init(void)
+//设备物理层的初始化net_dev_init
+ //TCP/IP协议栈初始化inet_init 其实传输层的协议初始化也在这里面
+ //传输层初始化proto_init  只是为了显示各种协议用的
+ //套接口层初始化sock_init  netfilter_init在套接口层初始化的时候也初始化了
+ static int __init inet_init(void)
 {
 	struct inet_protosw *q;
 	struct list_head *r;
@@ -1747,7 +1881,7 @@ static int __init inet_init(void)
 		goto out_unregister_raw_proto;
 
 	/*
-	 *	Tell SOCKET that we are alive...
+	 *	Tell SOCKET that we are alive...注册socket，告诉socket inet类型的地址族已经准备好了
 	 */
 
 	(void)sock_register(&inet_family_ops);
@@ -1757,7 +1891,11 @@ static int __init inet_init(void)
 #endif
 
 	/*
-	 *	Add all the base protocols.
+	 *	Add all the base protocols.包括arp,ip、ICMP、UPD、tcp_v4、tcp、igmp的初始化，
+	 *	主要初始化各种协议对应的inode和socket变量。
+	 *	其中arp_init完成系统中路由部分neighbour表的初始化ip_init完成ip协议的初始化。
+	 *	在这两个函数中，都通过定义一个packet_type结构的变量将这种数据包对应的协议发送数据、
+	 *	允许发送设备都做初始化。
 	 */
 
 	if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
@@ -1776,7 +1914,7 @@ static int __init inet_init(void)
 		INIT_LIST_HEAD(r);
 
 	for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
-		inet_register_protosw(q);
+		inet_register_protosw(q); //把inetsw_array结构中的节点添加到inetsw表中，以type为索引
 
 	/*
 	 *	Set the ARP module up
@@ -1806,8 +1944,9 @@ static int __init inet_init(void)
 	/*
 	 *	Set the ICMP layer up
 	 */
-
-	if (icmp_init() < 0)
+        /*由于协议栈本身有发送ICMP数据报的需求，所以，需要在协议栈中创建内核态的原始套接字，用于发送ICMP数据报，这个事情在协议栈初始化时，
+        由 icmp_init函数完成。它为每个CPU都创建一个icmp_socket，创建工作由sock_create_kern函数完成，创建流程跟应用层 创建socket完全一致。*/
+    if (icmp_init() < 0)
 		panic("Failed to create the ICMP control socket.\n");
 
 	/*
@@ -1845,7 +1984,7 @@ out_unregister_tcp_proto:
 	goto out;
 }
 
-fs_initcall(inet_init);
+fs_initcall(inet_init);//internet协议族的初始化
 
 /* ------------------------------------------------------------------------ */
 

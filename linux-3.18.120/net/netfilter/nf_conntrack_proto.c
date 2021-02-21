@@ -65,6 +65,7 @@ nf_ct_unregister_sysctl(struct ctl_table_header **header,
 }
 #endif
 
+//获取加入到nf_ct_protos中的L4协议结构
 struct nf_conntrack_l4proto *
 __nf_ct_l4proto_find(u_int16_t l3proto, u_int8_t l4proto)
 {

@@ -30,9 +30,17 @@
 int sysctl_tcp_syncookies __read_mostly = 1;
 EXPORT_SYMBOL(sysctl_tcp_syncookies);
 
+/*
+ * 表示当进程太忙而不能接受新的连接时，是否主动
+ * 向对方发送RST段。默认值是0(false)。该选项可能会影
+ * 响使用，只有在确认进程真的不能完成连接请求时
+ * 才该打开此选项。通常用于apache这类服务，这样可
+ * 以很快让客户端终止连接，让服务程序有机会处理
+ * 已有的连接
+ */
 int sysctl_tcp_abort_on_overflow __read_mostly;
 
-struct inet_timewait_death_row tcp_death_row = {
+struct inet_timewait_death_row tcp_death_row = {  //关闭套接字的时候出现TIME_WAIT的inet_timewait_sock的管理，系统当前TIME_WAIT状态的套接字
 	.sysctl_max_tw_buckets = NR_FILE * 2,
 	.period		= TCP_TIMEWAIT_LEN / INET_TWDR_TWKILL_SLOTS,
 	.death_lock	= __SPIN_LOCK_UNLOCKED(tcp_death_row.death_lock),
@@ -263,6 +271,15 @@ EXPORT_SYMBOL(tcp_timewait_state_process);
 /*
  * Move a socket to time-wait or dead fin-wait-2 state.
  */
+/*
+ * @sk: 被取代的传输控制块。
+ * @state: timewait控制块内部的状态，为FIN_WAIT2或TIME_WAIT
+ * @timeo: 等待超时时间  //本端发送的fin已经收到确认，等待对方发送fin,或者主动关闭端收到了第二个fin进入time_wait状态
+ * sock结构进入TIME_WAIT状态有两种情况：一种是在真正进入了TIME_WAIT状态，还有一种是真实的状态是FIN_WAIT_2的TIME_WAIT状态。之所以让FIN_WAIT_2状态在没有
+ * 接收到FIN包的情况下也可以进入TIME_WAIT状态是因为tcp_sock结构占用的资源要比tcp_timewait_sock结构占用的资源多，而且在TIME_WAIT下也可以处理连接的关闭。
+ * 内核在处理时通过inet_timewait_sock结构的tw_substate成员来区分这种两种情况。
+ */
+ //参考:http://blog.csdn.net/justlinux2010/article/details/9070057
 void tcp_time_wait(struct sock *sk, int state, int timeo)
 {
 	struct inet_timewait_sock *tw = NULL;
@@ -270,17 +287,58 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 	const struct tcp_sock *tp = tcp_sk(sk);
 	bool recycle_ok = false;
 
+	/*
+	 * 如果启用tw_recycle，且ts_recent_stamp有效，则记录
+	 * 相关时间戳信息到对端信息管理块中
+	 * tcp_timestamps参数用来设置是否启用时间戳选项，tcp_tw_recycle参数用来启用快速回收TIME_WAIT套接字。tcp_timestamps参数会影响到
+	 * tcp_tw_recycle参数的效果。如果没有时间戳选项的话，tcp_tw_recycle参数无效，
+	 */
 	if (tcp_death_row.sysctl_tw_recycle && tp->rx_opt.ts_recent_stamp)
+		/*
+		 * 调用的是tcp_v4_remember_stamp()。
+		 * 如果没有时间戳选项，tp->rx_opt.ts_recent_stamp的值为0，这样局部变量recycle_ok的值为0，在后面就会使用默认的时间TCP_TIMEWAIT_LEN（60s）
+		 * 作为TIME_WAIT状态的时间长度
+		 * 允许重用timewait传输控制块，并且成功记录了时间戳,则recycle_ok为1
+		 * tcp_timestamps参数用来设置是否启用时间戳选项，tcp_tw_recycle参数用来启用快速回收TIME_WAIT套接字。tcp_timestamps参数会影响到tcp_tw_recycle参数的效果。如果没有时间戳选项的话，tcp_tw_recycle参数无效
+		 */
 		recycle_ok = tcp_remember_stamp(sk);
 
+	/*
+	 * 如果当前系统中TIME_WATI状态的套接字数未
+	 * 达到最大值，则允许分配timewait控制块。
+	 * inet_twsk_alloc()用来分配timewait控制块，并根据
+	 * 传输控制块设置其对应的属性和内部状态
+	 */
 	if (tcp_death_row.tw_count < tcp_death_row.sysctl_max_tw_buckets)
 		tw = inet_twsk_alloc(sk, state);
 
-	if (tw != NULL) {
+	/*
+	 * 如果timewait控制块分配成功，则做相应设置，
+	 * 同时进入TIME_WAIT状态
+	 */
+	if (tw != NULL) { //所以在TIME_WAIT套接字数量超过系统限制或者内存不足
 		struct tcp_timewait_sock *tcptw = tcp_twsk((struct sock *)tw);
-		const int rto = (icsk->icsk_rto << 2) - (icsk->icsk_rto >> 1);
+		/*
+		 * 根据超时重传时间计算TIME_WAIT状态的
+		 * 超时时间，后者是前者的3.5倍。
+		 * 为什么是3.5倍参见inet_twsk_schedule()函数
+		 * 
+		 * 下面在来看看为什么rto的值要选择为icsk->icsk_rto的3.5倍，也就是RTO*3.5，而不是2倍、4倍呢？我们知道，在FIN_WAIT_2状态下接收到FIN包后，会给对
+		 * 端发送ACK包，完成TCP连接的关闭。但是最后的这个ACK包可能对端没有收到，在过了RTO（超时重传时间）时间后，对端会重新发送FIN包，这时需要再次给对
+		 * 端发送ACK包，所以TIME_WAIT状态的持续时间要保证对端可以重传两次FIN包。如果重传两次的话，TIME_WAIT的时间应该为RTO*（0.5+0.5+0.5）=RTO*1.5，但是
+		 * 这里却是RTO*3.5。这是因为在重传情况下，重传超时时间采用一种称为“指数退避”的方式计算。例如：当重传超时时间为1S的情况下发生了数据重传，我们就用
+		 * 重传超时时间为2S的定时器来重传数据，下一次用4S，一直增加到64S为止（参见tcp_retransmit_timer（））。所以这里的RTO*3.5=RTO*0.5+RTO*1+RTO*2,其中
+		 * RTO*0.5是第一次发送ACK的时间到对端的超时时间（系数就是乘以RTO的值），RTO*1是对端第一次重传FIN包到ACK包到达对端的超时时间，RTO*2是对端第二次重传
+		 * FIN包到ACK包到达对端的超时时间。注意，重传超时时间的指数退避操作（就是乘以2）是在重传之后执行的，所以第一次重传的超时时间和第一次发送的超时时间
+		 * 相同。整个过程及时间分布如下图所示（注意：箭头虽然指向对端，只是用于描述过程，数据包并未被接收到）：参考:http://blog.csdn.net/justlinux2010/article/details/9070057
+		 */
+		const int rto = (icsk->icsk_rto << 2) - (icsk->icsk_rto >> 1);//icsk->icsk_rto的值是超时重传的时间，这个值是根据网络情况动态计算的
 		struct inet_sock *inet = inet_sk(sk);
-
+		
+		/*
+		 * 从TCP控制块中获取对应的属性值
+		 * 设置到timewait控制块中
+		 */
 		tw->tw_transparent	= inet->transparent;
 		tw->tw_rcv_wscale	= tp->rx_opt.rcv_wscale;
 		tcptw->tw_rcv_nxt	= tp->rcv_nxt;
@@ -322,13 +380,36 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 #endif
 
 		/* Linkage updates. */
+		/*
+		 * 将timewait控制块添加到tcp_hashinfo的ebash散列表中，
+		 * 将被替代的TCP控制块从ehash散列表中删除。这样
+		 * FIN_WAIT2和TIME_WAIT状态下也可以进行输入的处理。
+		 * 同时将该timewait控制块添加到bhash散列表中，但
+		 * 并不删除该散列表中被替代的TCP控制块，因为
+		 * 只要inet->num不为0，这个绑定关系就存在，
+		 * 即使该套接字已经关闭
+		 */
+
 		__inet_twsk_hashdance(tw, sk, &tcp_hashinfo);
 
 		/* Get the TIME_WAIT timeout firing. */
+		/*
+		 * TIME_WAIT的超时时间不得小于3.5倍的超时
+		 * 重传的时间
+		 */
 		if (timeo < rto)
 			timeo = rto;
+        /*
+         * 允许重用timewait传输控制块，并且成功记录了时间戳,
+         * 则recycle_ok为1，此时会使用rto来设置真正的TIME-WAIT
+         * 状态的时间(参见tcp_timewait_state_process())，
+         * 否则使用固定的TCP_TIMEWAIT_LEN来设置TIME-WAIT状态的
+         * 时间。
+         * 如果没有时间戳选项，tp->rx_opt.ts_recent_stamp的值为0，这样局部变量recycle_ok的值为0，在后面就会使用默认的时间TCP_TIMEWAIT_LEN（60s）
+		 * 作为TIME_WAIT状态的时间长度
+         */
 
-		if (recycle_ok) {
+		if (recycle_ok) {//在设置tcp_tw_recycle参数的情况下，tw->tw_timeout的值为rto，否则为TCP_TIMEWAIT_LEN。所以tcp_tw_recycle参数如果要实现对回收TIME_WAIT状态套接字的加速，需要这个时间rto小于TCP_TIMEWAIT_LEN。rto的值由下面的式子计算：
 			tw->tw_timeout = rto;
 		} else {
 			tw->tw_timeout = TCP_TIMEWAIT_LEN;
@@ -336,9 +417,15 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 				timeo = TCP_TIMEWAIT_LEN;
 		}
 
-		inet_twsk_schedule(tw, &tcp_death_row, timeo,
+		/*
+		 * 进入TIME_WAIT状态，并启动TIME_WAIT定时器,超时时间
+         * 为timeo,但是上限为TCP_TIMEWAIT_LEN，即超时时间最多
+         * 不能超过TCP_TIMEWAIT_LEN。
+		 */
+		 inet_twsk_schedule(tw, &tcp_death_row, timeo,
 				   TCP_TIMEWAIT_LEN);
 		inet_twsk_put(tw);
+		//这里后会在后面释放原来的struct sock
 	} else {
 		/* Sorry, if we're out of memory, just CLOSE this
 		 * socket up.  We've got bigger problems than
@@ -346,7 +433,11 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		 */
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPTIMEWAITOVERFLOW);
 	}
-
+	
+	/*
+	 * 将TCP中的一些测量值更新到它路由缓存项的
+	 * 度量值中，然后关闭并释放传输控制块
+	 */
 	tcp_update_metrics(sk);
 	tcp_done(sk);
 }
@@ -529,7 +620,23 @@ EXPORT_SYMBOL(tcp_create_openreq_child);
  *
  * We don't need to initialize tmp_opt.sack_ok as we don't use the results
  */
-
+/*
+ * 用来处理接收到的TCP段，处理过程如下:
+ * 1. 解析并获取段中的TCP选项
+ * 2. 检验TCP序号
+ * 3. 如果是SYN段，则作为SYN段再处理一次
+ * 4. 检测ACK段确认序号是否有效，无效则立即返回不作处理
+ * 5. 检测ACK段序号是否有效，无效则丢弃该段
+ * 6. 如果是RST段或者是新的SYN段，则向客户端返送RST段进行复位
+ * 7. 校验通过，创建相应的"子"传输控制块
+ * 8. 将连接请求块插入已完成连接的队列中，等待用户进程的accept()调用
+ * 
+ * @sk: 处理服务端连接过程的监听传输控制块
+ * @skb: 接收到的TCP段
+ * @req: 客户端请求的连接建立的连接请求块
+ */
+//这里面如果判断是ack会创建新的'子'struct sock，在函数tcp_v4_syn_recv_sock
+//走到这里面来只可能是服务器端收到客户端的重传SYN或者 握手中的第三步ACK
 struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 			   struct request_sock *req,
 			   struct request_sock **prev,
@@ -718,6 +825,11 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 	 * ESTABLISHED STATE. If it will be dropped after
 	 * socket is created, wait for troubles.
 	 */
+	/*
+	 * 到此为止作为第三次握手的
+	 * ACK段是有效的，因此调用tcp_v4_syn_recv_sock()
+	 * 创建相应的"子"传输控制块
+	 */
 	child = inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, NULL);
 	if (child == NULL)
 		goto listen_overflow;
@@ -772,10 +884,12 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 	int ret = 0;
 	int state = child->sk_state;
 
+	/* 如果用户进程没有锁住child，则让child重新处理该ACK报文，这可以让child套接字由TCP_SYN_RECV迁移到TCP_ESTABLISH状态*/
 	if (!sock_owned_by_user(child)) {
 		ret = tcp_rcv_state_process(child, skb, tcp_hdr(skb),
 					    skb->len);
 		/* Wakeup parent, send SIGIO */
+		/* child套接字状态发生了迁移，唤醒监听套接字上的进程，可能由于调用accept()而block */
 		if (state == TCP_SYN_RECV && child->sk_state != state)
 			parent->sk_data_ready(parent);
 	} else {
@@ -783,6 +897,7 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 		 * in main socket hash table and lock on listening
 		 * socket does not protect us more.
 		 */
+		 /* 添加到backlog队列中，缓存该skb后续处理 */
 		__sk_add_backlog(child, skb);
 	}
 

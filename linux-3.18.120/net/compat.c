@@ -32,6 +32,7 @@
 #include <asm/uaccess.h>
 #include <net/compat.h>
 
+//从用户空间的msghdr中的iovec成员地址中解析出iovec信息， uiov32和niov是从get_compat_msghdr中获取的用户空间sendmsg的时候的目的msg_iov地址和msg_iovlen值
 static inline int iov_from_user_compat_to_kern(struct iovec *kiov,
 					  struct compat_iovec __user *uiov32,
 					  int niov)
@@ -59,6 +60,7 @@ static inline int iov_from_user_compat_to_kern(struct iovec *kiov,
 	return tot_len;
 }
 
+//把应用层的umsg解析到内核空间的msghdr结构的kmsg中，这里应该是获取的用户空间的地址
 int get_compat_msghdr(struct msghdr *kmsg, struct compat_msghdr __user *umsg)
 {
 	compat_uptr_t tmp1, tmp2, tmp3;
@@ -88,6 +90,8 @@ int get_compat_msghdr(struct msghdr *kmsg, struct compat_msghdr __user *umsg)
 }
 
 /* I've named the args so it is easy to tell whose space the pointers are in. */
+//kern_msg为从应用层中解析出的msghdr结构，通过该结构可以获取到iovec和目的sockaddr结构信息
+//这里的kernmsg里面的各个成员信息是通过从get_compat_msghdr中获取的用户空间sendmsg的时候的msghdr的各个成员信息
 int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
 		   struct sockaddr_storage *kern_address, int mode)
 {
@@ -97,7 +101,7 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
 		if (mode == VERIFY_READ) {
 			int err = move_addr_to_kernel(kern_msg->msg_name,
 						      kern_msg->msg_namelen,
-						      kern_address);
+						      kern_address); //获取对端地址sockaddr
 			if (err < 0)
 				return err;
 		}
@@ -109,9 +113,9 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
 
 	tot_len = iov_from_user_compat_to_kern(kern_iov,
 					  (struct compat_iovec __user *)kern_msg->msg_iov,
-					  kern_msg->msg_iovlen);
+					  kern_msg->msg_iovlen); //获取i/o矢量信息iovec
 	if (tot_len >= 0)
-		kern_msg->msg_iov = kern_iov;
+		kern_msg->msg_iov = kern_iov;//这里msg_iov才指向解析出的msg_iov信息
 
 	return tot_len;
 }
@@ -119,6 +123,7 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
 /* Bleech... */
 #define CMSG_COMPAT_ALIGN(len)	ALIGN((len), sizeof(s32))
 
+//这个是获取应用层msghdr中紧跟在头部后面的数据部分
 #define CMSG_COMPAT_DATA(cmsg)				\
 	((void __user *)((char __user *)(cmsg) + CMSG_COMPAT_ALIGN(sizeof(struct compat_cmsghdr))))
 #define CMSG_COMPAT_SPACE(len)				\
@@ -126,6 +131,7 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
 #define CMSG_COMPAT_LEN(len)				\
 	(CMSG_COMPAT_ALIGN(sizeof(struct compat_cmsghdr)) + (len))
 
+//获取msghdr结构中的第一个msg_control
 #define CMSG_COMPAT_FIRSTHDR(msg)			\
 	(((msg)->msg_controllen) >= sizeof(struct compat_cmsghdr) ?	\
 	 (struct compat_cmsghdr __user *)((msg)->msg_control) :		\
@@ -151,6 +157,7 @@ static inline struct compat_cmsghdr __user *cmsg_compat_nxthdr(struct msghdr *ms
  * thus placement) of cmsg headers and length are different for
  * 32-bit apps.  -DaveM
  */
+//kmsg里面存储的是指向应用层msghdr各个成员的地址信息， stackbuf用来保存内核获取到的应用层cmsghdr信息
 int cmsghdr_from_user_compat_to_kern(struct msghdr *kmsg, struct sock *sk,
 			       unsigned char *stackbuf, int stackbuf_size)
 {
@@ -162,8 +169,8 @@ int cmsghdr_from_user_compat_to_kern(struct msghdr *kmsg, struct sock *sk,
 
 	kcmlen = 0;
 	kcmsg_base = kcmsg = (struct cmsghdr *)stackbuf;
-	ucmsg = CMSG_COMPAT_FIRSTHDR(kmsg);
-	while (ucmsg != NULL) {
+	ucmsg = CMSG_COMPAT_FIRSTHDR(kmsg);//从msghdr中的msg_control获取第一个cmsghdr
+	while (ucmsg != NULL) { //这个while循环是为了获取应用层中msg_control信息的总长度
 		if (get_user(ucmlen, &ucmsg->cmsg_len))
 			return -EFAULT;
 
@@ -175,7 +182,7 @@ int cmsghdr_from_user_compat_to_kern(struct msghdr *kmsg, struct sock *sk,
 		       CMSG_ALIGN(sizeof(struct cmsghdr)));
 		tmp = CMSG_ALIGN(tmp);
 		kcmlen += tmp;
-		ucmsg = cmsg_compat_nxthdr(kmsg, ucmsg, ucmlen);
+		ucmsg = cmsg_compat_nxthdr(kmsg, ucmsg, ucmlen); //获取下一个compat_cmsghdr结构地址
 	}
 	if (kcmlen == 0)
 		return -EINVAL;
@@ -193,7 +200,9 @@ int cmsghdr_from_user_compat_to_kern(struct msghdr *kmsg, struct sock *sk,
 	/* Now copy them over neatly. */
 	memset(kcmsg, 0, kcmlen);
 	ucmsg = CMSG_COMPAT_FIRSTHDR(kmsg);
-	while (ucmsg != NULL) {
+
+	//这里为什么有个while，因为用户可以通过多个cmsghdr携带多个用户数据报文，一个cmsghdr头后面紧跟一个用户数据
+	while (ucmsg != NULL) {//解析msghdr结构中的msg_control信息，为了方便理解可以参考樊东东下P641
 		if (__get_user(ucmlen, &ucmsg->cmsg_len))
 			goto Efault;
 		if (!CMSG_COMPAT_OK(ucmlen, ucmsg, kmsg))
@@ -208,7 +217,7 @@ int cmsghdr_from_user_compat_to_kern(struct msghdr *kmsg, struct sock *sk,
 		    __get_user(kcmsg->cmsg_type, &ucmsg->cmsg_type) ||
 		    copy_from_user(CMSG_DATA(kcmsg),
 				   CMSG_COMPAT_DATA(ucmsg),
-				   (ucmlen - CMSG_COMPAT_ALIGN(sizeof(*ucmsg)))))
+				   (ucmlen - CMSG_COMPAT_ALIGN(sizeof(*ucmsg)))))  //获取cmsghdr中的cmsg_level和cmsg_type字段及其cmsghdr后面紧跟的实际用户数据
 			goto Efault;
 
 		/* Advance. */

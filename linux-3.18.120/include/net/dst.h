@@ -30,20 +30,54 @@
 
 struct sk_buff;
 
+/*
+ * dst_entry结构被用于存储缓存路由项中独立于
+ * 协议的信息。三层协议在另外的结构中存储
+ * 本协议中更多的私有信息(例如，IPv4使用
+ * rtable结构)。
+ */
 struct dst_entry {
+	/*
+	 * 互斥处理
+	 */
 	struct rcu_head		rcu_head;
+	/*
+	 * 与IPsec相关
+	 */
 	struct dst_entry	*child;   //后继路由
+	/*
+	 * 输出网络设备(即将报文送达目的地的
+	 * 发送设备)。
+	 */
 	struct net_device       *dev; //关联的设备
 	struct  dst_ops	        *ops; //路由操作结构
 	unsigned long		_metrics;
+	/*
+	 * 表示该表项将过期的时间戳
+	 */
 	unsigned long           expires;
+	/*
+	 * 与IPsec相关
+	 */
 	struct dst_entry	*path;    //路由的路径
 	struct dst_entry	*from;
 #ifdef CONFIG_XFRM
+	/*
+	 * 与IPsec相关
+	 */
 	struct xfrm_state	*xfrm;
 #else
 	void			*__pad1;
 #endif
+        /*
+         * 对需要交付到本地的分组，input设置为ip_local_deliver,
+         * 而output设置为ip_rt_bug(该函数只向内核日志输出一个
+         * 错误信息,因为在内核代码中对本地分组调用output是
+         * 一种错误,不应该发生)
+         * 对需要转发的分组，input设置为ip_forward,而output设置为
+         * ip_output函数
+         */
+       /* 处理进入的分组*/
 	int			(*input)(struct sk_buff *);  //输入钩子函数
 	int			(*output)(struct sock *sk, struct sk_buff *skb); //输出钩子函数
 
@@ -490,12 +524,21 @@ static inline int dst_output_sk(struct sock *sk, struct sk_buff *skb)
 {
 	return skb_dst(skb)->output(sk, skb);
 }
+/*
+ * 封装了输出数据包目的路由缓存项中
+ * 的输出接口。
+ */
 static inline int dst_output(struct sk_buff *skb)
 {
-	return dst_output_sk(skb->sk, skb);
+    /*
+     * 如果是单播数据包，设置的是ip_output(),
+     * 如果是组播数据包，设置的是ip_mc_output().
+     */
+	return dst_output_sk(skb->sk, skb);//最终会走到IP层输出函数dev_queue_xmit
 }
 
 /* Input packet from network to transport.  */
+/* 这个input有可能是ip_local_deliver()或ip_forward()。*/
 static inline int dst_input(struct sk_buff *skb)
 {
 	return skb_dst(skb)->input(skb);

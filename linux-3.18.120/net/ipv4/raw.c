@@ -79,11 +79,15 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/compat.h>
+/*因为在创建 socket时，inet_create会把协议号IPPROTO_ICMP的值赋给socket的成员num，并以num为键值，把socket存入哈 项表raw_v4_htable，
+raw_v4_htable[IPPROTO_ICMP&(MAX_INET_PROTOS-1)]上即存放了这个socket，实际上是一个socket的链表*/  //见raw_local_deliver
 
+//raw套接字在inet_create中会执行raw_prot->hash，从而加入到raw_v4_hashinfo
 static struct raw_hashinfo raw_v4_hashinfo = {
 	.lock = __RW_LOCK_UNLOCKED(raw_v4_hashinfo.lock),
 };
 
+//raw_prot里面的hash字段
 void raw_hash_sk(struct sock *sk)
 {
 	struct raw_hashinfo *h = sk->sk_prot->h.raw_hash;
@@ -130,6 +134,17 @@ found:
  *	0 - deliver
  *	1 - block
  */
+/*
+结构体raw_sock有 一个成员struct icmp_filter filter，它实际上是一个32位无符号数，如果某位为零，则相应的该类型的icmp报文被屏蔽，不能被应用层接收到，icmp报文类型号的最大值为 18，所以32位是足够的，
+ping程序需要能够收到icmp的回显应答报文，所以，需要关掉屏蔽位(相应位设为1)，这可以通过socket命令字 ICMP_FILTER来实现，所以，
+ping程序的实现中需要这样的源代码：
+     struct icmp_filter filter.data = 1 << ICMP_ECHOREPLY;
+     int err = setsockopt( sock, SOL_RAW, ICMP_FILTER, &filter, sizeof(struct icmp_filter) );
+     if( err < 0 )
+        perror("error: ");
+    但实际上，ICMP_ECHOREPLY的值是0，即协议栈是永远不会屏蔽回显应答报文的，所以，这步操作其实是没有必要的。
+    收到的skb交给raw_rcv处理，raw_rcv调用raw_rcv_skb，把收到的skb放入socket的接收队列。应用程序收到数据报，解析icmp首部即可。
+*/
 static int icmp_filter(const struct sock *sk, const struct sk_buff *skb)
 {
 	struct icmphdr _hdr;
@@ -182,7 +197,7 @@ static int raw_v4_input(struct sk_buff *skb, const struct iphdr *iph, int hash)
 
 			/* Not releasing hash table! */
 			if (clone)
-				raw_rcv(sk, clone);
+				raw_rcv(sk, clone);//之前开巨帧的时候，icmp不通就是在这里面的函数中sock_queue_rcv_skb丢的
 		}
 		sk = __raw_v4_lookup(net, sk_next(sk), iph->protocol,
 				     iph->saddr, iph->daddr,
@@ -271,7 +286,17 @@ static void raw_err(struct sock *sk, struct sk_buff *skb, u32 info)
 		sk->sk_error_report(sk);
 	}
 }
-
+/*
+ * 通过传输层协议号，首先在raw_v4_hashinfo的散列表
+ * 中查找是否有对应的原始套接字的传输控制块，
+ * 如果有，则调用raw_err()将差错报文传递上去。
+ * 由于原始套接字传输控制块的存在，应用程序
+ * 可以组装各种协议的数据报，如TCP段、UDP数据
+ * 报等。这里判断不了到底是原始套接字发送的
+ * 报文导致的差错，还是由TCP或UDP套接字发送报文
+ * 导致的差错。因此只能先把差错发给原始套接字(如果
+ * 存在)，然后再发给TCP或UDP套接字
+ */
 void raw_icmp_error(struct sk_buff *skb, int protocol, u32 info)
 {
 	int hash;
@@ -894,8 +919,8 @@ static int compat_raw_ioctl(struct sock *sk, unsigned int cmd, unsigned long arg
 	}
 }
 #endif
-
-struct proto raw_prot = {
+//原始套接字传输层操作集
+struct proto raw_prot = { ////直接从ip_local_deliver_finish函数中跳转到raw_prot   raw的套接口层操作集在inetsw_array数组中的inet_sockraw_ops
 	.name		   = "RAW",
 	.owner		   = THIS_MODULE,
 	.close		   = raw_close,
@@ -903,7 +928,7 @@ struct proto raw_prot = {
 	.connect	   = ip4_datagram_connect,
 	.disconnect	   = udp_disconnect,
 	.ioctl		   = raw_ioctl,
-	.init		   = raw_init,
+	.init		   = raw_init,  //inet_create中执行
 	.setsockopt	   = raw_setsockopt,
 	.getsockopt	   = raw_getsockopt,
 	.sendmsg	   = raw_sendmsg,
@@ -911,7 +936,7 @@ struct proto raw_prot = {
 	.bind		   = raw_bind,
 	.backlog_rcv	   = raw_rcv_skb,
 	.release_cb	   = ip4_datagram_release_cb,
-	.hash		   = raw_hash_sk,
+	.hash		   = raw_hash_sk, //inet_create中执行
 	.unhash		   = raw_unhash_sk,
 	.obj_size	   = sizeof(struct raw_sock),
 	.h.raw_hash	   = &raw_v4_hashinfo,

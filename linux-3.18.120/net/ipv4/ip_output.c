@@ -90,7 +90,7 @@ void ip_send_check(struct iphdr *iph)
 	iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
 }
 EXPORT_SYMBOL(ip_send_check);
-
+//当IP头部封装好后，调用__ip_local_out
 int __ip_local_out(struct sk_buff *skb)
 {
 	struct iphdr *iph = ip_hdr(skb);
@@ -98,9 +98,10 @@ int __ip_local_out(struct sk_buff *skb)
 	iph->tot_len = htons(skb->len);
 	ip_send_check(iph);
 	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT, skb, NULL,
-		       skb_dst(skb)->dev, dst_output);
+		       skb_dst(skb)->dev, dst_output);//通过dst_output最终会走到IP层输出函数dev_queue_xmit
 }
 
+//通过ip_local_out最终会走到IP层输出函数dev_queue_xmit
 int ip_local_out_sk(struct sock *sk, struct sk_buff *skb)
 {
 	int err;
@@ -163,6 +164,10 @@ int ip_build_and_send_pkt(struct sk_buff *skb, struct sock *sk,
 }
 EXPORT_SYMBOL_GPL(ip_build_and_send_pkt);
 
+/*
+ * 此函数通过邻居子系统将数据包输出
+ * 到网络设备。
+ */
 static inline int ip_finish_output2(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
@@ -178,6 +183,11 @@ static inline int ip_finish_output2(struct sk_buff *skb)
 		IP_UPD_PO_STATS(dev_net(dev), IPSTATS_MIB_OUTBCAST, skb->len);
 
 	/* Be paranoid, rather than too clever. */
+	/*
+	 * 检测skb的前部空间是否还能存储链路层首部。
+	 * 如果不够，则重新分配更大存储区的skb，
+	 * 并释放原skb。
+	 */
 	if (unlikely(skb_headroom(skb) < hh_len && dev->header_ops)) {
 		struct sk_buff *skb2;
 
@@ -193,6 +203,13 @@ static inline int ip_finish_output2(struct sk_buff *skb)
 	}
 
 	rcu_read_lock_bh();
+	/*
+	 * 如果缓存了链路层的首部，则调用
+	 * neigh_hh_output()输出数据包。否则，
+	 * 若存在对应的邻居项，则通过
+	 * 邻居项的输出方法输出数据包。
+	 */ 
+	 //最后调用二层函数dev_queue_xmit
 	nexthop = (__force u32) rt_nexthop(rt, ip_hdr(skb)->daddr);
 	neigh = __ipv4_neigh_lookup_noref(dev, nexthop);
 	if (unlikely(!neigh))
@@ -205,6 +222,11 @@ static inline int ip_finish_output2(struct sk_buff *skb)
 	}
 	rcu_read_unlock_bh();
 
+	/*
+	 * 如果既没有缓存链路层的首部，又
+	 * 不存在对应的邻居项，在这种情况
+	 * 下，不能输出，释放该数据包。
+	 */
 	net_dbg_ratelimited("%s: No header cache and no neighbour!\n",
 			    __func__);
 	kfree_skb(skb);
@@ -332,6 +354,9 @@ int ip_mc_output(struct sock *sk, struct sk_buff *skb)
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
 }
 
+/*
+ * 对于单播数据包，目的路由缓存项中的输出接口是ip_output().
+ */
 int ip_output(struct sock *sk, struct sk_buff *skb)
 {
 	struct net_device *dev = skb_dst(skb)->dev;
@@ -344,6 +369,9 @@ int ip_output(struct sock *sk, struct sk_buff *skb)
 	/* 指定报文类型为IP packet.*/
 	skb->protocol = htons(ETH_P_IP);
 
+	/*
+	 * 经netfilter处理后，调用ip_finish_output()继续IP数据包的输出
+	 */
 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING, skb, NULL, dev,
 			    ip_finish_output,
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
@@ -486,7 +514,15 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
  *	a block of the data of the original IP data part) that will yet fit in a
  *	single device frame, and queue such a frame for sending.
  */
-
+/*
+ * 当要将一个IP数据包从本地发送或转发出去时，
+ * 如果发现该IP数据包大于当前的MTU或路径MTU，
+ * 则调用ip_fragment()将数据包分片后再发送出去。
+ * @skb: 待分片后发送或转发的IP数据包，即原始
+ *           数据包，该数据包应该包含已初始化的IP首部
+ * @output:将完成分片输出的回调函数，IPv4中为
+ *              ip_finish_output2().
+ */
 int ip_fragment(struct sk_buff *skb, int (*output)(struct sk_buff *))
 {
 	struct iphdr *iph;
@@ -956,6 +992,9 @@ static int __ip_append_data(struct sock *sk,
 
 	struct ip_options *opt = cork->opt;
 	int hh_len;
+    /*
+     * exthdrlen用于记录IPsec中扩展首部的长度，未启用IPsec时为0
+     */
 	int exthdrlen;
 	int mtu;
 	int copy;
@@ -966,7 +1005,9 @@ static int __ip_append_data(struct sock *sk,
 	struct rtable *rt = (struct rtable *)cork->dst;
 	u32 tskey = 0;
 
+	/*这里skb有两种情况，如果队列为空，则skb = NULL，否则为尾部skb的指针 */
 	skb = skb_peek_tail(queue);
+	
 
 	exthdrlen = !skb ? rt->dst.header_len : 0;
 	mtu = cork->fragsize;
@@ -974,13 +1015,17 @@ static int __ip_append_data(struct sock *sk,
 	    sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID)
 		tskey = sk->sk_tskey++;
 
+	/*链路层首部长度 */
 	hh_len = LL_RESERVED_SPACE(rt->dst.dev);
 
+	/* IP首部（包括IP选项）长度 */
 	fragheaderlen = sizeof(struct iphdr) + (opt ? opt->optlen : 0);
+	/* 最大IP首部长度,注意对齐 */
 	maxfraglen = ((mtu - fragheaderlen) & ~7) + fragheaderlen;
 	maxnonfragsize = ip_sk_ignore_df(sk) ? 0xFFFF : mtu;
 
 	if (cork->length + length > maxnonfragsize - fragheaderlen) {
+		/*一个IP数据包最大大小不能超过64K */
 		ip_local_error(sk, EMSGSIZE, fl4->daddr, inet->inet_dport,
 			       mtu - (opt ? opt->optlen : 0));
 		return -EMSGSIZE;
@@ -994,9 +1039,16 @@ static int __ip_append_data(struct sock *sk,
 	    length + fragheaderlen <= mtu &&
 	    rt->dst.dev->features & NETIF_F_V4_CSUM &&
 	    !exthdrlen)
+	    /*由硬件执行校验和计算 */
 		csummode = CHECKSUM_PARTIAL;
 
+	/*更新数据长度 */
 	cork->length += length;
+	/* 对于UDP报文，新加的数据长度大于MTU，并且需要进行分片，则需要
+     * 进行分片处理
+     * 这里相当于《understand linux network internel》图21-11最左边的那条支线
+     * 注意：这里需要加入判断skb是否为NULL
+     */
 	if ((skb && skb_is_gso(skb)) ||
 	    (((length + fragheaderlen) > mtu) &&
 	    (skb_queue_len(queue) <= 1) &&
@@ -1023,11 +1075,31 @@ static int __ip_append_data(struct sock *sk,
 
 	while (length > 0) {
 		/* Check if the remaining data fits into current packet. */
+        /*
+         * 检测待发送数据是否能全部复制到最后一个SKB的剩余空间中。如果可以，
+         * 则说明是IP分片中的上一个分片，可以不用4字节对齐，否则需要4字节
+         * 对齐，因此用8字节对齐后的MTU减去上一个SKB的数据长度，得到上一个
+         * SKB的剩余空间大小，也就是本次复制数据的长度.
+         * 当本次复制数据的长度copy小于等于0时，说明上一个SKB已经填满或
+         * 空间不足8B，需要分配新的SKB。
+         * 当copy大于0时，说明上一个SKB有剩余空间，数据可以复制到该SKB中去。
+         *
+         */
 		copy = mtu - skb->len;
 		if (copy < length)
 			copy = maxfraglen - skb->len;
+        /*
+         * 如果上一个SKB已经填满或空间不足8B，或者不存在上一个SKB，则将数据复制到
+         * 新分配的SKB中去。
+         */
 		if (copy <= 0) {
 			char *data;
+            /*
+             * 如果上一个SKB（通常是在调用ip_append_data()时，
+             * 输出队列中最后一个SKB）中存在多余8字节对齐的MTU的数据，
+             * 则这些数据需移动到当前SKB中，确保最后一个IP分片之外的
+             * 数据能够4字节对齐，因此需计算移动到当前SKB的数据长度。
+             */
 			unsigned int datalen;
 			unsigned int fraglen;
 			unsigned int fraggap;
@@ -1035,7 +1107,9 @@ static int __ip_append_data(struct sock *sk,
 			struct sk_buff *skb_prev;
 alloc_new_skb:
 			skb_prev = skb;
+			/*需要计算从上一个skb中复制到新的新的skb中的数据长度 */
 			if (skb_prev)
+				/*明显就是copy取反 */
 				fraggap = skb_prev->len - maxfraglen;
 			else
 				fraggap = 0;
@@ -1044,11 +1118,32 @@ alloc_new_skb:
 			 * If remaining data exceeds the mtu,
 			 * we know we need more fragment(s).
 			 */
+            /*
+             * 如果剩余数据的长度超过MTU，则需要更多的分片。
+             */
+            /*
+             * 计算需要复制到新SKB中的数据长度。因为如果前一个SKB
+             * 还能容纳数据，则有一部分数据会复制到前一个SKB中。
+             */
 			datalen = length + fraggap;
+            /*
+             * 如果剩余的数据一个分片不够容纳，则根据MTU重新计算本次
+             * 可发送的数据长度。
+             */
 			if (datalen > mtu - fragheaderlen)
 				datalen = maxfraglen - fragheaderlen;
+            /*
+             * 根据本次复制的数据长度以及IP首部长度，计算三层
+             * 首部及其数据的总长度
+             */
 			fraglen = datalen + fragheaderlen;
 
+            /*
+             * 如果后续还有数据要输出且网络设备不支持聚合分散I/O，则将
+             * MTU作为分配SKB的长度，使分片达到最长，为后续的数据
+             * 预备空间。否则按数据的长度（包括IP首部）分配SKB的空间
+             * 即可。
+             */
 			if ((flags & MSG_MORE) &&
 			    !(rt->dst.dev->features&NETIF_F_SG))
 				alloclen = mtu;
@@ -1062,9 +1157,22 @@ alloc_new_skb:
 			 * because we have no idea what fragment will be
 			 * the last.
 			 */
+            /*
+             * 如果是最后一个分片，且是根据目的路由启用IPsec的情况，
+             * 则可能需要多分配一些空间来支持IPsec。
+             */
 			if (datalen == length + fraggap)
 				alloclen += rt->dst.trailer_len;
 
+
+            /*
+             * 根据是否存在传输层首部，确定用何种方法分配SKB。
+             * 如果存在传输层首部，则可以确定该分片为分片组中的
+             * 第一个分片，因此在分配SKB时需要考虑更多的情况，如
+             * 输出操作是否超时,传输层是否发生未处理的致命错误，
+             * 发送通道是否已关闭等。当分片不是第一个分片时，
+             * 则无需考虑以上情况
+             */
 			if (transhdrlen) {
 				skb = sock_alloc_send_skb(sk,
 						alloclen + hh_len + 15,
@@ -1085,8 +1193,15 @@ alloc_new_skb:
 			/*
 			 *	Fill in the control structures
 			 */
+            /*
+             * 填充用于校验的控制信息
+             */
 			skb->ip_summed = csummode;
 			skb->csum = 0;
+            /*
+             * 为数据包预留用于存放二层首部、三层首部和数据的空间，
+             * 并设置SKB中指向三层和四层的指针。
+             */
 			skb_reserve(skb, hh_len);
 
 			/* only the initial fragment is time stamped */
@@ -1104,6 +1219,11 @@ alloc_new_skb:
 						 fragheaderlen);
 			data += fragheaderlen + exthdrlen;
 
+            /*
+             * 如果上一个SKB的数据超过8字节对齐MTU，则将超出数据和
+             * 传输层首部复制到当前SKB，重新计算校验和，并以8字节
+             * 对齐MTU为长度截取上一个SKB的数据。
+             */
 			if (fraggap) {
 				skb->csum = skb_copy_and_csum_bits(
 					skb_prev, maxfraglen,
@@ -1261,7 +1381,7 @@ int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 		err = ip_setup_cork(sk, &inet->cork.base, ipc, rtp);
 		if (err)
 			return err;
-	} else {
+	} else {/*队列不为空，则使用上次的路由，IP选项，以及分片长度 */
 		transhdrlen = 0;
 	}
 

@@ -5,7 +5,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-
+//该模块没有调用任何模块
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/netfilter.h>
@@ -22,6 +22,8 @@
 #endif
 #include <net/netfilter/nf_conntrack_zones.h>
 
+/* Returns new sk_buff, or NULL */
+//只有当IP分片重组成功时，nf_ct_ipv4_gather_frags才会返回为0。也就是说，当IP分片重组不成功，即IP分片被kernel分片模块缓存时，该函数返回为NF_STOLEN。
 static int nf_ct_ipv4_gather_frags(struct sk_buff *skb, u_int32_t user)
 {
 	int err;
@@ -61,6 +63,8 @@ static enum ip_defrag_users nf_ct_defrag_user(unsigned int hooknum,
 		return IP_DEFRAG_CONNTRACK_OUT + zone;
 }
 
+/*对于PREROUTING这个HOOK点的分片重组，无疑对于分片而言，只是进入HOOK，暂时保存在里面，直到所有分片都来了切重组成功 后才一次性流出这个HOOK点*/
+//frag分片 defrag分片重组
 static unsigned int ipv4_conntrack_defrag(const struct nf_hook_ops *ops,
 					  struct sk_buff *skb,
 					  const struct net_device *in,

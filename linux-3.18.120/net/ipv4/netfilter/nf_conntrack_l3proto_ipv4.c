@@ -7,6 +7,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+//ipv4连接跟踪模块
 
 #include <linux/types.h>
 #include <linux/ip.h>
@@ -31,6 +32,7 @@
 #include <net/netfilter/ipv4/nf_defrag_ipv4.h>
 #include <net/netfilter/nf_log.h>
 
+//获取报文中的源IP目的IP
 static bool ipv4_pkt_to_tuple(const struct sk_buff *skb, unsigned int nhoff,
 			      struct nf_conntrack_tuple *tuple)
 {
@@ -92,6 +94,15 @@ static int ipv4_get_l4proto(const struct sk_buff *skb, unsigned int nhoff,
 	return NF_ACCEPT;
 }
 
+
+/*
+对于一个新链接，在ipv4_conntrack_in()函数中只是创建了struct nf_conn结构，但并没有将该结构挂载到链接跟踪的Hash表中，因为此时还
+不能确定该链接是否会被NF_IP_FORWARD点上的钩子函数过滤掉，所以将挂载到Hash表的工作放到了ipv4_confirm()函数中。
+子链接的helper功能也是在该函数中实现的。
+*/
+/*
+ipv4_confirm()函数主要负责确认链接(即将链接挂入到正式的链接表中)、执行helper函数、启动链接超时定时器等
+*/
 static unsigned int ipv4_helper(const struct nf_hook_ops *ops,
 				struct sk_buff *skb,
 				const struct net_device *in,
@@ -156,6 +167,9 @@ static unsigned int ipv4_conntrack_in(const struct nf_hook_ops *ops,
 	return nf_conntrack_in(dev_net(in), PF_INET, ops->hooknum, skb);
 }
 
+/*
+*ipv4_conntrack_local() 挂载在NF_IP_LOCAL_OUT点上。该函数功能与ipv4_conntrack_in()函数基本相同，但其用来处理本机主动向外发起的链接。
+*/
 static unsigned int ipv4_conntrack_local(const struct nf_hook_ops *ops,
 					 struct sk_buff *skb,
 					 const struct net_device *in,
@@ -323,6 +337,7 @@ getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nfnetlink_conntrack.h>
 
+//拷贝L3中的源和目的IP到SKB对应的地方
 static int ipv4_tuple_to_nlattr(struct sk_buff *skb,
 				const struct nf_conntrack_tuple *tuple)
 {

@@ -40,8 +40,20 @@
  * The 'e' prefix stands for Establish, but we really put all sockets
  * but LISTEN ones.
  */
+/*
+ * 用来管理TCP状态除LISTEN之外的传输控制块的散列表
+ */ //inet_ehash_bucket的图像化理解可以参考，樊东东，下册P735
+ //hash表头为inet_hashinfo的ehash
 struct inet_ehash_bucket {
+	/*
+	 * 用于链接传输控制块
+	 * 服务器端三次握手成功后对应的struct tcp_sock添加到这个hash表头中，客户端在发送syn之前如果检查端口等可用，
+	 * 则在__inet_check_established中的__sk_nulls_add_node_rcu把sk添加到ehash中
+	 */
 	struct hlist_nulls_head chain;
+	/*
+	 * 用于链接TIME_WAIT状态的传输控制块
+	 */
 };
 
 /* There are a few simple rules, which allow for local port reuse by
@@ -75,15 +87,35 @@ struct inet_ehash_bucket {
  * users logged onto your box, isn't it nice to know that new data
  * ports are created in O(1) time?  I thought so. ;-)	-DaveM
  */
-struct inet_bind_bucket {
+//赋值在这个函数中inet_bind_hash ，
+//存放的是端口绑定信息， inet_bind_bucket_create创建   __inet_put_port释放
+//该结构最终添加到inet_bind_hashbucket结构的chain中
+//该结构是在客户端connect分配客户端端口的时候有用到，在做客户端connect的时候创建inet_bind_bucket空间
+//该结构体最终的结果是，struct sock被添加到inet_bind_bucket结构的owners链表中(inet_bind_hash)，然后该inet_bind_bucket通过node节点加入到tcp_hashinfo的chain中，inet_bind_hashbucket中的(inet_bind_bucket_create)
+/*该结构在三次握手成功的时候首先通过owners连接到inet_connection_sock中的icsk_bind_hash，当在端口连接过程中进入timewait的过程中该inet_bind_bucket会从新连接到
+tw->tw_bind_node,见inet_timewait_sock中，所以三次握手端口的timewait 释放sk的时候，并没有释放掉该bind桶，见__inet_twsk_hashdance*/
+//图形化结构理解参考樊东东下P775            释放的地方在__inet_put_port
+struct inet_bind_bucket { //存储在inet_hashinfo中的bhash表中，对应的hashbucket为inet_bind_hashbucket        
+//所有的inet_bind_bucket实例通过它里面的node成员连接在一起，然后添加到inet_bind_hashbucket的chain中，最后在把chain连接到inet_hashinfo中的bhash中
+//同时在应用程序客户端connect或者服务器端bind的时候，通过owners把该inet_bind_bucket添加到struct sock中的sk_bind_node中,同时inet_csk(sk)->icsk_bind_hash指向这个inet_bind_bucket，
+//这样inet_bind_bucket就可以和struct sock关联起来。见inet_bind_hash
 #ifdef CONFIG_NET_NS
 	struct net		*ib_net;
 #endif
+	/*
+	 * 已绑定的端口号
+	 */
 	unsigned short		port;
 	signed char		fastreuse;
-	signed char		fastreuseport;
+	/*
+	 * 标识端口是否能重用
+	 * 0: 此端口已通过bind系统调用绑定，但不能重用
+	 * 1: 此端口已经通过bind系统调用绑定，且能重用  sk->sk_reuse可以重用的话，这个值就可以重用
+	 * -1: 此端口被客户端动态绑定(由inet_hash_connection()进行绑定)
+	 */
+	signed char		fastreuseport;//__inet_hash_connect客户端连接在检查fastreuseport是否可复用时，还得继续检查__inet_check_established，inet_csk_get_port
 	kuid_t			fastuid;
-	int			num_owners;
+	int			num_owners;//被sk引用次数，inet_bind_hash
 	struct hlist_node	node;
 	struct hlist_head	owners;
 };
@@ -116,6 +148,7 @@ struct inet_listen_hashbucket {
 /* This is for listening sockets, thus all sockets which possess wildcards. */
 #define INET_LHTABLE_SIZE	32	/* Yes, really, this is all you need. */
 
+//tcp_hashinfo的图像化理解可以参考，樊东东，下册P734
 struct inet_hashinfo {
 	/* This is for sockets with full identity only.  Sockets here will
 	 * always be without wildcards and will have the following invariant:
@@ -123,7 +156,16 @@ struct inet_hashinfo {
 	 *          TCP_ESTABLISHED <= sk->sk_state < TCP_CLOSE
 	 *
 	 */
-	struct inet_ehash_bucket	*ehash;
+	/*
+	 * ehash指向一个大小为ehash_size的inet_ehash_bucket结构类型的散列
+	 * 表，用来管理TCP状态除LISTEN之外的传输控制块的散列表
+	 * tcp表又分成了三张表ehash, bhash, listening_hash，其中ehash, listening_hash对应于socket处在TCP的ESTABLISHED, LISTEN状态，bhash对应于socket
+	 * 已绑定了本地地址。三者间并不互斥，如一个socket可同时在bhash和ehash中，由于TIME_WAIT是一个比较特殊的状态，所以ehash又分成了chain和twchain，
+	 * 为TIME_WAIT的socket单独形成一张表。
+	 */
+	 //inet_timewait_sock通过__inet_twsk_hashdance加入到该ehash中的twrefcnt += hash(sk, tw);。服务器端accept的时候，是在建立连接成功的时候才放到该ehash中的。
+	 //客户端connect的时候，立马加入到该hash中，见__inet_hash_connect
+	struct inet_ehash_bucket	*ehash;//见inet_ehash_bucket函数  这个hash桶里面的是多个连接成功的sock,timewait的sock也在这里面
 	spinlock_t			*ehash_locks;
 	unsigned int			ehash_mask;
 	unsigned int			ehash_locks_mask;
@@ -131,12 +173,21 @@ struct inet_hashinfo {
 	/* Ok, let's try this, I give up, we do need a local binding
 	 * TCP hash as well as the others for fast bind/connect.
 	 */
-	struct inet_bind_hashbucket	*bhash;
+	/*
+	 * 主要用来存储已绑定端口的信息  inet_bind_bucket  该结构是在客户端connect分配客户端端口的时候有用到,在连接建立过程中只用ehash和listening_hash
+	 */
+	//所有的inet_bind_bucket实例通过它里面的node成员连接在一起，然后添加到inet_bind_hashbucket的chain中，最后在把chain连接到inet_hashinfo中的bhash中
+    //如果是客户端连接，则在connect的时候调用inet_bind_hash，然后添加到该hash桶中，见__inet_hash_connect
+    //在连接端口，进入timewait状态的时候，inet_timewait_sock也会添加到该bhash中，见__inet_twsk_hashdance
+    //释放函数在inet_bind_bucket
+	struct inet_bind_hashbucket	*bhash;//被绑定的端口信息会一直在该。下次绑定其他端口或者分配端口的时候需要用这个遍历检查。图形化结构理解参考樊东东下P775
 
 	unsigned int			bhash_size;
 	/* 4 bytes hole on 64 bit */
-
-	struct kmem_cache		*bind_bucket_cachep;
+	/*
+	 * 用来分配inet_bind_hashbucket结构的后备高速缓存
+	 */
+	 struct kmem_cache		*bind_bucket_cachep;
 
 	/* All the above members are written once at bootup and
 	 * never written again _or_ are predominantly read-access.
@@ -148,10 +199,16 @@ struct inet_hashinfo {
 	 * table where wildcard'd TCP sockets can exist.  Hash function here
 	 * is just local port number.
 	 */
+	/*
+	 * 用来存储管理LISTEN状态的传输控制块的散列表。在listen状态的时候进入，见inet_csk_listen_start
+	 */
 	struct inet_listen_hashbucket	listening_hash[INET_LHTABLE_SIZE]
 					____cacheline_aligned_in_smp;
 
-	atomic_t			bsockets;
+	/*
+	 * 应该是已绑定的套接字的数量 inet_bind_hash
+	 */
+	 atomic_t			bsockets;
 };
 
 static inline struct inet_ehash_bucket *inet_ehash_bucket(
@@ -238,6 +295,7 @@ static inline int inet_lhashfn(struct net *net, const unsigned short num)
 	return (num + net_hash_mix(net)) & (INET_LHTABLE_SIZE - 1);
 }
 
+//通过sk来接收一个hash 键值
 static inline int inet_sk_listen_hashfn(const struct sock *sk)
 {
 	return inet_lhashfn(sock_net(sk), inet_sk(sk)->inet_num);

@@ -21,7 +21,7 @@ struct gnet_dump {
 	int               compat_xstats;
 	void *            xstats;
 	int               xstats_len;
-	struct tc_stats   tc_stats;
+	struct tc_stats   tc_stats; //¼ûgnet_stats_copy_queue
 };
 
 int gnet_stats_start_copy(struct sk_buff *skb, int type, spinlock_t *lock,

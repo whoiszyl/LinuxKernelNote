@@ -497,6 +497,8 @@ static void tcp_sack(const struct sk_buff *skb, unsigned int dataoff,
 	}
 }
 
+//通过确认号、序列号和窗口判断数据包合法性
+//参考:http://blog.csdn.net/efan_linux/article/details/4604375
 static bool tcp_in_window(const struct nf_conn *ct,
 			  struct ip_ct_tcp *state,
 			  enum ip_conntrack_dir dir,
@@ -517,13 +519,15 @@ static bool tcp_in_window(const struct nf_conn *ct,
 
 	/*
 	 * Get the required data from the packet.
+	// 客户端发的第一个SYN包是到不了这个函数的,直接就接受了,
+	// 是从连接的第2个包以后才进入本函数处理
 	 */
 	seq = ntohl(tcph->seq);
 	ack = sack = ntohl(tcph->ack_seq);
 	win = ntohs(tcph->window);
-	end = segment_seq_plus_len(seq, skb->len, dataoff, tcph);
+	end = segment_seq_plus_len(seq, skb->len, dataoff, tcph);// 本数据包结束序列号
 
-	if (receiver->flags & IP_CT_TCP_FLAG_SACK_PERM)
+	if (receiver->flags & IP_CT_TCP_FLAG_SACK_PERM)// 接收方支持SACK的话检查是否在TCP选项中有SACK 
 		tcp_sack(skb, dataoff, tcph, &sack);
 
 	/* Take into account NAT sequence number mangling */

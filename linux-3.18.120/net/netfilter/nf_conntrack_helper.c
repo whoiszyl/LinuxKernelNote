@@ -9,6 +9,10 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+/* 处理一个连接的子连接协议，利用nf_conntrack_helper.c文件中的nf_conntrack_helper_register(struct nf_conntrack_helper *me)来注册nf_conntrack_helper结构
+ * 参考:http://blog.csdn.net/ye_shizhe/article/details/17331947
+ * 连接跟踪为每个应用成的协议通过一个helper结构，同过这个结构的成员函数应用层的协议可以做一些与自己协议相关的工作
+ */
 
 #include <linux/types.h>
 #include <linux/netfilter.h>
@@ -31,6 +35,10 @@
 #include <net/netfilter/nf_conntrack_extend.h>
 #include <net/netfilter/nf_log.h>
 
+/*
+参考:http://blog.csdn.net/ye_shizhe/article/details/17331947
+连接跟踪为每个应用成的协议通过一个helper结构，同过这个结构的成员函数应用层的协议可以做一些与自己协议相关的工作
+*/
 static DEFINE_MUTEX(nf_ct_helper_mutex);
 struct hlist_head *nf_ct_helper_hash __read_mostly;
 EXPORT_SYMBOL_GPL(nf_ct_helper_hash);
@@ -44,6 +52,9 @@ MODULE_PARM_DESC(nf_conntrack_helper,
 		 "Enable automatic conntrack helper assignment (default 1)");
 
 #ifdef CONFIG_SYSCTL
+
+//参考:http://blog.csdn.net/ye_shizhe/article/details/17331947
+// 节点为struct nf_conntrack_helper   见nf_conntrack_helper_register
 static struct ctl_table helper_sysctl_table[] = {
 	{
 		.procname	= "nf_conntrack_helper",
@@ -264,6 +275,7 @@ static inline int unhelp(struct nf_conntrack_tuple_hash *i,
 	return 0;
 }
 
+//释放help相关资源
 void nf_ct_helper_destroy(struct nf_conn *ct)
 {
 	struct nf_conn_help *help = nfct_help(ct);

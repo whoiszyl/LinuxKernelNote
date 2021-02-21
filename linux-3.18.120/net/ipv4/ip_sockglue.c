@@ -144,6 +144,7 @@ static void ip_cmsg_recv_dstaddr(struct msghdr *msg, struct sk_buff *skb)
 	put_cmsg(msg, SOL_IP, IP_ORIGDSTADDR, sizeof(sin), &sin);
 }
 
+//报文控制信息的输入 樊东东P236
 void ip_cmsg_recv(struct msghdr *msg, struct sk_buff *skb)
 {
 	struct inet_sock *inet = inet_sk(skb->sk);
@@ -186,6 +187,8 @@ void ip_cmsg_recv(struct msghdr *msg, struct sk_buff *skb)
 }
 EXPORT_SYMBOL(ip_cmsg_recv);
 
+//樊东东P235 UDP或者RAW在sendmsg的时候，如果应用程序的hsghdr中带有控制信息，则会执行该函数。
+//报文控制信息的输出
 int ip_cmsg_send(struct net *net, struct msghdr *msg, struct ipcm_cookie *ipc,
 		 bool allow_ipv6)
 {
@@ -215,14 +218,14 @@ int ip_cmsg_send(struct net *net, struct msghdr *msg, struct ipcm_cookie *ipc,
 		if (cmsg->cmsg_level != SOL_IP)
 			continue;
 		switch (cmsg->cmsg_type) {
-		case IP_RETOPTS:
+		case IP_RETOPTS: //解析IP选项信息
 			err = cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr));
 			err = ip_options_get(net, &ipc->opt, CMSG_DATA(cmsg),
 					     err < 40 ? err : 40);
 			if (err)
 				return err;
 			break;
-		case IP_PKTINFO:
+		case IP_PKTINFO:  //解析出输出接口和
 		{
 			struct in_pktinfo *info;
 			if (cmsg->cmsg_len != CMSG_LEN(sizeof(struct in_pktinfo)))

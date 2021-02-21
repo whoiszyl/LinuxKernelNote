@@ -745,7 +745,15 @@ static bool icmp_tag_validation(int proto)
  *	Handle ICMP_DEST_UNREACH, ICMP_TIME_EXCEED, ICMP_QUENCH, and
  *	ICMP_PARAMETERPROB.
  */
-
+ /*
+ * 目的不可达、源端被关闭、超时、参数错误这四种类型
+ * 的差错ICMP报文，都是由同一个函数icmp_unreach()来处理的，
+ * 对其中目的不可达、源端被关闭这两种类型ICMP报文
+ * 因要提取某些信息而需作一些特殊的处理，而另外
+ * 一些则不需要，根据差错报文中的信息直接调用
+ * 传输层的错误处理例程。参见<Linux内核源码剖析348页>
+ *///ICMP差错报文的数据部分包括:原始数据报的IP首部再加上前8个字节的数据部分(2字节源端口+2字节目的端口+4字节序号)
+//参考P229 樊东东
 static void icmp_unreach(struct sk_buff *skb)
 {
 	const struct iphdr *iph;
@@ -760,10 +768,20 @@ static void icmp_unreach(struct sk_buff *skb)
 	 * 	Only checks for the IP header, there should be an
 	 *	additional check for longer headers in upper levels.
 	 */
-
+    /*
+	 * 检测ICMP报文长度是否包含了原始IP首部和原始IP数据包中
+	 * 前8字节数据，如果不完整则返回
+	 */
 	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto out_err;
 
+    /*
+	 * 获取ICMP报文的ICMP首部指针以及导致差错
+	 * 的数据报中的IP首部指针，并通过该IP
+	 * 首部的首部长度字段来校验该IP首部是否
+	 * 正常，ICMP报文中导致差错的数据报中的
+	 * IP首部应该不少于20B。(iph->ihl以4字节为单位)
+	 */
 	icmph = icmp_hdr(skb);
 	iph   = (const struct iphdr *)skb->data;
 
@@ -772,11 +790,23 @@ static void icmp_unreach(struct sk_buff *skb)
 
 	if (icmph->type == ICMP_DEST_UNREACH) {
 		switch (icmph->code & 15) {
+		/*
+		 * 其中网络不可达、主机不可达、协议
+		 * 不可达、端口不可达四种目的不可达
+		 * ICMP报文无需特殊处理。
+		 */
 		case ICMP_NET_UNREACH:
 		case ICMP_HOST_UNREACH:
 		case ICMP_PROT_UNREACH:
 		case ICMP_PORT_UNREACH:
 			break;
+
+	    /*
+		 * 处理目的不可达需要分片的差错报文，
+		 * 如果系统禁止使用路径MTU发现，则只是
+		 * 打印些信息。否则，则调用ip_rt_frag_needed()
+		 * 更新路由缓存项并获取有效的PMTU
+		 */
 		case ICMP_FRAG_NEEDED:
 			/* for documentation of the ip_no_pmtu_disc
 			 * values please see
@@ -797,6 +827,9 @@ static void icmp_unreach(struct sk_buff *skb)
 				info = ntohs(icmph->un.frag.mtu);
 			}
 			break;
+		/*
+		 * 处理源站选路失败报文，打印相关信息
+		 */
 		case ICMP_SR_FAILED:
 			LIMIT_NETDEBUG(KERN_INFO pr_fmt("%pI4: Source Route Failed\n"),
 				       &iph->daddr);
@@ -807,6 +840,11 @@ static void icmp_unreach(struct sk_buff *skb)
 		if (icmph->code > NR_ICMP_UNREACH)
 			goto out;
 	} else if (icmph->type == ICMP_PARAMETERPROB)
+	    /*
+		 * 处理参数问题的差错报文，获取ICMP首部中的指针值。
+		 * 指针值存储在ICMP报文第2个32位字的高8位，因此获得
+		 * 该值后需右移24位。
+		 */
 		info = ntohl(icmph->un.gateway) >> 24;
 
 	/*
@@ -826,7 +864,15 @@ static void icmp_unreach(struct sk_buff *skb)
 	 *	first check your netmask matches at both ends, if it does then
 	 *	get the other vendor to fix their kit.
 	 */
-
+    /*
+         * 根据系统参数sysctl_icmp_ignore_bogus_error_responses
+         * 来确定接收或忽略"目的不可达并且目的
+         * IP地址为广播地址"这样无效的ICMP报文。
+         * 如果忽略，则在接收到这样的ICMP报文后，
+         * 会记录相应的警告信息。net_ratelimit()
+         * 是内核打印限速函数，返回TRUE时可
+         * 打印调试信息
+         */
 	if (!net->ipv4.sysctl_icmp_ignore_bogus_error_responses &&
 	    inet_addr_type(net, iph->daddr) == RTN_BROADCAST) {
 		net_warn_ratelimited("%pI4 sent an invalid ICMP type %u, code %u error to a broadcast: %pI4 on %s\n",
@@ -1196,7 +1242,9 @@ static struct pernet_operations __net_initdata icmp_sk_ops = {
        .init = icmp_sk_init,
        .exit = icmp_sk_exit,
 };
-
+/*由于协议栈本身有发送ICMP数据报的需求，所以，需要在协议栈中创建内核态的原始套接字，用于发送ICMP数据报，这个事情在协议栈初始化时，
+ *由 icmp_init函数完成。它为每个CPU都创建一个icmp_socket，创建工作由sock_create_kern函数完成，创建流程跟应用层 创建socket完全一致。
+ */
 int __init icmp_init(void)
 {
 	return register_pernet_subsys(&icmp_sk_ops);

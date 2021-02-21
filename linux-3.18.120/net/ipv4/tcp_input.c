@@ -397,19 +397,21 @@ static void tcp_fixup_rcvbuf(struct sock *sk)
 	if (sysctl_tcp_moderate_rcvbuf)
 		rcvmem <<= 2;
 
-	if (sk->sk_rcvbuf < rcvmem)
+	if (sk->sk_rcvbuf < rcvmem)//这种情况下才会重新设置sk_rcvbuf空间大小
 		sk->sk_rcvbuf = min(rcvmem, sysctl_tcp_rmem[2]);
 }
 
 /* 4. Try to fixup all. It is made immediately after connection enters
  *    established state.
+ *	当进入establish状态之后,sock会自己调整sndbuf和rcvbuf.他是通过tcp_init_buffer_space来进行调整的.
+ *	这个函数会调用tcp_fixup_rcvbuf和tcp_fixup_sndbuf来调整读写buf的大小.
  */
 void tcp_init_buffer_space(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	int maxwin;
 
-	if (!(sk->sk_userlocks & SOCK_RCVBUF_LOCK))
+	if (!(sk->sk_userlocks & SOCK_RCVBUF_LOCK)) //如果用户没有设置rcvbuf和sndbuf的时候，会自动调整这两个值
 		tcp_fixup_rcvbuf(sk);
 	if (!(sk->sk_userlocks & SOCK_SNDBUF_LOCK))
 		tcp_sndbuf_expand(sk);
@@ -1643,13 +1645,16 @@ tcp_sacktag_write_queue(struct sock *sk, const struct sk_buff *ack_skb,
 			u32 prior_snd_una, long *sack_rtt_us)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	/* SACK选项的起始地址，sacked为SACK选项在TCP首部的偏移 */
 	const unsigned char *ptr = (skb_transport_header(ack_skb) +
 				    TCP_SKB_CB(ack_skb)->sacked);
+	/* 指向第一个sack块 */
 	struct tcp_sack_block_wire *sp_wire = (struct tcp_sack_block_wire *)(ptr+2);
 	struct tcp_sack_block sp[TCP_NUM_SACKS];
 	struct tcp_sack_block *cache;
 	struct tcp_sacktag_state state;
 	struct sk_buff *skb;
+	/* sack的块数 */
 	int num_sacks = min(TCP_NUM_SACKS, (ptr[1] - TCPOLEN_SACK_BASE) >> 3);
 	int used_sacks;
 	bool found_dup_sack = false;
@@ -1660,8 +1665,10 @@ tcp_sacktag_write_queue(struct sock *sk, const struct sk_buff *ack_skb,
 	state.reord = tp->packets_out;
 	state.rtt_us = -1L;
 
+	/* 如果之前没有SACKed的数据 */
 	if (!tp->sacked_out) {
 		if (WARN_ON(tp->fackets_out))
+			/* FACK是根据最新的SACK来计算的，所以也要为0 */
 			tp->fackets_out = 0;
 		tcp_highest_sack_reset(sk);
 	}
@@ -3418,6 +3425,12 @@ static inline void tcp_in_ack_event(struct sock *sk, u32 flags)
 }
 
 /* This routine deals with incoming acks, but not outgoing ones. */
+/*
+ * tcp_ack()用于处理接收到有ACK标志的段，当接到有效的ACK后会更新
+ * 发送窗口。
+ * @skb: 接收到的ACK段
+ * @flag: 标志，取值为FLAG_DATA等
+ */
 static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -3438,6 +3451,18 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	/* If the ack is older than previous acks
 	 * then we can probably ignore it.
 	 */
+	 /*
+	 * 检验确认的序号是否落在SND.UNA和SND.NXT之间，否则
+	 * 是不合法的序号。
+	 * 如果确认的序号在SND.NXT的右边，则说明该序号的数据
+	 * 发送方还没有发送，直接返回。
+	 * 如果确认的序号在SND.UNA的左边，则说明已经接受过
+	 * 该序号的ACK了。因为每个有负载的TCP段都会顺便
+	 * 携带一个ACK序号，即使这个序号已经确认过。因此
+	 * 如果是一个重复的ACK就无需作处理直接返回即可。但
+	 * 如果段中带有SACK选项，则需对此进行处理
+	 */
+	 //说明接收到了重复的ack
 	if (before(ack, prior_snd_una)) {
 		/* RFC 5961 5.2 [Blind Data Injection Attack].[Mitigation] */
 		if (before(ack, prior_snd_una - tp->max_window)) {
@@ -3457,6 +3482,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	    icsk->icsk_pending == ICSK_TIME_LOSS_PROBE)
 		tcp_rearm_rto(sk);
 
+	//说明收到的是已发送出去包的ack
 	if (after(ack, prior_snd_una)) {
 		flag |= FLAG_SND_UNA_ADVANCED;
 		icsk->icsk_retransmits = 0;
@@ -3467,6 +3493,9 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	/* ts_recent update must be made after we are sure that the packet
 	 * is in window.
 	 */
+	/*
+	 * 获取正在传输中的段数
+	 */
 	if (flag & FLAG_UPDATE_TS_RECENT)
 		tcp_replace_ts_recent(tp, TCP_SKB_CB(skb)->seq);
 
@@ -3474,6 +3503,11 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 		/* Window is constant, pure forward advance.
 		 * No more checks are required.
 		 * Note, we use the fact that SND.UNA>=SND.WL2.
+		 */
+		 /*
+		 * 如果接收ACK执行的是快速路径,则更新发送窗口的左边界,
+		 * 添加FLAG_WIN_UPDATE标记,同时通知拥塞控制算法模块
+		 * 本次ACK是快速路径,如有必要,就作相应的处理
 		 */
 		tcp_update_wl(tp, ack_seq);
 		tp->snd_una = ack;
@@ -3483,6 +3517,10 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPHPACKS);
 	} else {
+    	/*
+    	 * 如果接收ACK执行的是慢速路径,首先判断ACK段中是否有
+    	 * 数据负载,如果有,则添加FLAG_DATA标记.
+    	 */
 		u32 ack_ev_flags = CA_ACK_SLOWPATH;
 
 		if (ack_seq != TCP_SKB_CB(skb)->end_seq)
@@ -3569,7 +3607,7 @@ old_ack:
 	/* If data was SACKed, tag it and see if we should send more data.
 	 * If data was DSACKed, see if we can undo a cwnd reduction.
 	 */
-	if (TCP_SKB_CB(skb)->sacked) {
+	if (TCP_SKB_CB(skb)->sacked) {//不为0，说明有携带该选项字段
 		flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
 						&sack_rtt_us);
 		tcp_fastretrans_alert(sk, acked, prior_unsacked,
@@ -3584,12 +3622,21 @@ old_ack:
  * But, this can also be called on packets in the established flow when
  * the fast version below fails.
  */
+/*
+ * tcp_parse_options()解析TCP选项，但通常只在分析SYN和SYN+ACK
+ * 段时被调用，此外慢速路径处理中，如果调用tcp_fast_parse_options()
+ * 失败，也可能在建立连接后调用之。
+ */
 void tcp_parse_options(const struct sk_buff *skb,
 		       struct tcp_options_received *opt_rx, int estab,
 		       struct tcp_fastopen_cookie *foc)
 {
 	const unsigned char *ptr;
 	const struct tcphdr *th = tcp_hdr(skb);
+	/*
+	 * 如果TCP首部中包含TCP选项，即该首部
+	 * 长度大于不包含TCP选项的普通TCP首部。
+	 */
 	int length = (th->doff * 4) - sizeof(struct tcphdr);
 
 	ptr = (const unsigned char *)(th + 1);
@@ -3598,20 +3645,47 @@ void tcp_parse_options(const struct sk_buff *skb,
 	while (length > 0) {
 		int opcode = *ptr++;
 		int opsize;
-
+        /*
+         * 取选项的第二个字节，即kind，根据
+         * 其值分别作处理
+         */
 		switch (opcode) {
+		/*
+		 * TCPOPT_EOL表示选项表结束，因此
+		 * 直接返回
+		 */
 		case TCPOPT_EOL:
 			return;
+
+		/*
+		 * TCPOPT_NOP为空操作，只做填充用，
+		 * 因此选项长度减1，进入下一个
+		 * 循环处理下一个选项
+		 */
 		case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
 			length--;
 			continue;
 		default:
+		    /*
+			 * 如果不是选项表结束标志也不是
+			 * 空操作，则取选项长度，并检测
+			 * 其合法性
+			 */
 			opsize = *ptr++;
 			if (opsize < 2) /* "silly options" */
 				return;
 			if (opsize > length)
 				return;	/* don't parse partial options */
 			switch (opcode) {
+			/*
+			 * TCPOPT_MSS用来通告最大段长度，TCPOPT_MSS
+			 * 宏定义为4，又因为MSS选项只能出现在
+			 * SYN段中，因此判断TCP头部中SYN是否置位，
+			 * 此时调用参数estab应该为0.取最大段长度MSS，
+			 * user_mss是用户以TCP_MAXSEG选项调用setsockopt()
+			 * 设置的，将最大段长度上限值mss_clamp
+			 * 设置为选项中的MSS和user_mss两者中的较小值。
+			 */
 			case TCPOPT_MSS:
 				if (opsize == TCPOLEN_MSS && th->syn && !estab) {
 					u16 in_mss = get_unaligned_be16(ptr);
@@ -3623,9 +3697,24 @@ void tcp_parse_options(const struct sk_buff *skb,
 					}
 				}
 				break;
+			/*
+			 * TCPOPT_WINDOW是窗口扩大因子选项，和最大
+			 * 段长度选项一样，也只能出现在SYN段中，
+			 * 因此作同样的判断。
+			 */
 			case TCPOPT_WINDOW:
 				if (opsize == TCPOLEN_WINDOW && th->syn &&
 				    !estab && sysctl_tcp_window_scaling) {
+				    /*
+					 * 取窗口扩大因子选项中的
+					 * 位移数，将表示SYN段中包含
+					 * 扩大因子选项的wscale_ok置为1，
+					 * 如果选项中的位移数大于14则
+					 * 警告，和网络相关的pintk都必须
+					 * 由net_ratelimit来监控。发送窗口
+					 * 扩大因子snd_wscale赋值为位移数和
+					 * 14两者中较小的值。
+					 */
 					__u8 snd_wscale = *(__u8 *)ptr;
 					opt_rx->wscale_ok = 1;
 					if (snd_wscale > 14) {
@@ -3637,6 +3726,9 @@ void tcp_parse_options(const struct sk_buff *skb,
 					opt_rx->snd_wscale = snd_wscale;
 				}
 				break;
+			/*
+			 * 时间戳选项
+			 */
 			case TCPOPT_TIMESTAMP:
 				if ((opsize == TCPOLEN_TIMESTAMP) &&
 				    ((estab && opt_rx->tstamp_ok) ||
@@ -3646,6 +3738,13 @@ void tcp_parse_options(const struct sk_buff *skb,
 					opt_rx->rcv_tsecr = get_unaligned_be32(ptr + 4);
 				}
 				break;
+			/*
+			 * TCPOPT_SACK_PERM为允许SACK选项，只能出现在
+			 * SYN段中。将sack_ok置为1，表示SYN段中允许
+			 * SACK选项。tcp_sack_reset()将tcp_options_received结构
+			 * 中的三个与SACK有关的字段dsack、eff_sacks和
+			 * num_sacks清零。
+			 */
 			case TCPOPT_SACK_PERM:
 				if (opsize == TCPOLEN_SACK_PERM && th->syn &&
 				    !estab && sysctl_tcp_sack) {
@@ -3654,6 +3753,14 @@ void tcp_parse_options(const struct sk_buff *skb,
 				}
 				break;
 
+            /*
+			 * TCPOLEN_SACK_BASE为2，TCPOLEN_SACK_PERBLOCK为8，因此
+			 * if语句的意思是选项长度包含kind、length字段以及
+			 * 一个至多个左右边界值对，且扣除kind和length字段
+			 * 长度后能被左右边界值对大小整除，sack_ok为1表示
+			 * 允许SACK。将tcp_skb_cb的sacked字段指向这些左右边界值
+			 * 对的开始处。
+			 */
 			case TCPOPT_SACK:
 				if ((opsize >= (TCPOLEN_SACK_BASE + TCPOLEN_SACK_PERBLOCK)) &&
 				   !((opsize - TCPOLEN_SACK_BASE) % TCPOLEN_SACK_PERBLOCK) &&
@@ -3883,6 +3990,15 @@ void tcp_reset(struct sock *sk)
  *
  *	If we are in FINWAIT-2, a received FIN moves us to TIME-WAIT.
  */
+ /*
+ * 在TCP中还有些地方会通知套接字的faync_list队列
+ * 上的进程。比如，当TCP接收到FIN段后，如果
+ * 此时套接字未在DEAD状态，则唤醒等待该套接
+ * 字的进程。如果在发送接收方向都进行了关闭，
+ * 或者此时该传输控制块处于CLOSE状态，则通知
+ * 异步等待该套接字的进程，该连接已经终止，
+ * 否则通知进程连接可以进行写操作。
+ */
 static void tcp_fin(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -3893,7 +4009,12 @@ static void tcp_fin(struct sock *sk)
 	sk->sk_shutdown |= RCV_SHUTDOWN;
 	sock_set_flag(sk, SOCK_DONE);
 
-	switch (sk->sk_state) {
+	switch (sk->sk_state) { //状态变迁产考TCP/IP详解18.2
+	/*
+	 * 在SYN_RECV和ESTABLISHED状态，接收到FIN段后，
+	 * 将状态设置为CLOSE_WAIT，并确定延时发送
+	 * ACK
+	 */
 	case TCP_SYN_RECV:
 	case TCP_ESTABLISHED:
 		/* Move to CLOSE_WAIT */
@@ -3903,6 +4024,12 @@ static void tcp_fin(struct sock *sk)
 			inet_csk(sk)->icsk_ack.pingpong = 1;
 		break;
 
+    /*
+     * 在CLOSE_WAIT状态接收到FIN段，则说明
+     * 收到的是重复的FIN段，忽略。
+     * 在CLOSING状态接收FIN段，也将其忽略，
+     * 因为在该状态只需等待ACK。
+     */
 	case TCP_CLOSE_WAIT:
 	case TCP_CLOSING:
 		/* Received a retransmission of the FIN, do
@@ -3913,6 +4040,11 @@ static void tcp_fin(struct sock *sk)
 		/* RFC793: Remain in the LAST-ACK state. */
 		break;
 
+    /*
+	 * 根据TCP状态迁移图，在FIN_WAIT1状态接收
+	 * FIN段，则发送ACK，进入CLOSING状态，并
+	 * 等待对端的ACK
+	 */
 	case TCP_FIN_WAIT1:
 		/* This case occurs when a simultaneous close
 		 * happens, we must ack the received FIN and
@@ -3921,11 +4053,20 @@ static void tcp_fin(struct sock *sk)
 		tcp_send_ack(sk);
 		tcp_set_state(sk, TCP_CLOSING);
 		break;
+
+	/*
+	 * 根据TCP状态迁移图，在FIN_WAIT2状态接收FIN段，
+	 * 则发送ACK，进入TIME_WAIT状态
+	 */
 	case TCP_FIN_WAIT2:
 		/* Received a FIN -- send ACK and enter TIME_WAIT. */
 		tcp_send_ack(sk);
 		tcp_time_wait(sk, TCP_TIME_WAIT, 0);
 		break;
+
+    /*
+	 * 在LISTEN和CLOSE状态忽略FIN段
+	 */
 	default:
 		/* Only TCP_LISTEN and TCP_CLOSE are left, in these
 		 * cases we should never reach this piece of code.
@@ -3938,6 +4079,14 @@ static void tcp_fin(struct sock *sk)
 	/* It _is_ possible, that we have something out-of-order _after_ FIN.
 	 * Probably, we should reset in this case. For now drop them.
 	 */
+	/*
+	 * 如果此时套接字未处于DEAD状态，则唤醒
+	 * 等待该套接字的进程。如果在发送接收
+	 * 方向上都进行了关闭，或此时该传输控制
+	 * 块处于CLOSE状态，则唤醒异步等待该套接字
+	 * 的进程，通知它们该链接已终止，否则通知
+	 * 它们连接可以进行写操作
+	 */ //被动断开的一方在收到FIN的时候，内核要通知给应用程序
 	__skb_queue_purge(&tp->out_of_order_queue);
 	if (tcp_is_sack(tp))
 		tcp_sack_reset(&tp->rx_opt);
@@ -4176,6 +4325,7 @@ static void tcp_ofo_queue(struct sock *sk)
 	struct sk_buff *skb, *tail;
 	bool fragstolen, eaten;
 
+	/* 遍历out_of_order队列 */
 	while ((skb = skb_peek(&tp->out_of_order_queue)) != NULL) {
 		if (after(TCP_SKB_CB(skb)->seq, tp->rcv_nxt))
 			break;
@@ -4187,6 +4337,7 @@ static void tcp_ofo_queue(struct sock *sk)
 			tcp_dsack_extend(sk, TCP_SKB_CB(skb)->seq, dsack);
 		}
 
+		/* 若这个报文可以按seq插入有序的receive队列中，则将其移出out_of_order队列 */
 		__skb_unlink(skb, &tp->out_of_order_queue);
 		if (!after(TCP_SKB_CB(skb)->end_seq, tp->rcv_nxt)) {
 			SOCK_DEBUG(sk, "ofo packet was already received\n");
@@ -4197,10 +4348,16 @@ static void tcp_ofo_queue(struct sock *sk)
 			   tp->rcv_nxt, TCP_SKB_CB(skb)->seq,
 			   TCP_SKB_CB(skb)->end_seq);
 
+		/* 取队尾 */
 		tail = skb_peek_tail(&sk->sk_receive_queue);
+
+		/* 尝试进行分段合并 */
 		eaten = tail && tcp_try_coalesce(sk, tail, skb, &fragstolen);
+		/* 更新下一个期望接收的序号 */
 		tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+		/* 未合并 */
 		if (!eaten)
+			/* 插入receive队列 */
 			__skb_queue_tail(&sk->sk_receive_queue, skb);
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
 			tcp_fin(sk);
@@ -4218,10 +4375,12 @@ static int tcp_try_rmem_schedule(struct sock *sk, struct sk_buff *skb,
 	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
 	    !sk_rmem_schedule(sk, skb, size)) {
 
+		/* 回收接收队列占用的缓存 */
 		if (tcp_prune_queue(sk) < 0)
 			return -1;
 
 		if (!sk_rmem_schedule(sk, skb, size)) {
+			/* 删除out_of_order_queue队列中的数据包 */
 			if (!tcp_prune_ofo_queue(sk))
 				return -1;
 
@@ -4232,14 +4391,19 @@ static int tcp_try_rmem_schedule(struct sock *sk, struct sk_buff *skb,
 	return 0;
 }
 
+/* 实际上是一颗红黑树 */
 static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb1;
 	u32 seq, end_seq;
 
+	/*如果收到乱序包 ，可能在传输过程中出现了 拥塞 
+	所以检查ecn 标志如果是路由器 拥塞会设置这个标志 说明路径上存在拥塞，需要
+	给发送方 接收方进行拥塞处理  如果没有拥塞 需要尽快通知 发送方*/
 	tcp_ecn_check_ce(sk, skb);
 
+	/* 队列满了丢掉 */
 	if (unlikely(tcp_try_rmem_schedule(sk, skb, skb->truesize))) {
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFODROP);
 		__kfree_skb(skb);
@@ -4247,14 +4411,18 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* Disable header prediction. */
+	/* 收到乱序包，关闭快速路径 */
 	tp->pred_flags = 0;
+	/* 乱序包会快速ack */
 	inet_csk_schedule_ack(sk);
 
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFOQUEUE);
 	SOCK_DEBUG(sk, "out of order segment: rcv_next %X seq %X - %X\n",
 		   tp->rcv_nxt, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
 
+	/* 取队尾 */
 	skb1 = skb_peek_tail(&tp->out_of_order_queue);
+	/* 如果是空队列则直接插入数据 */
 	if (!skb1) {
 		/* Initial out of order segment, build 1 SACK. */
 		if (tcp_is_sack(tp)) {
@@ -4273,10 +4441,13 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 	if (seq == TCP_SKB_CB(skb1)->end_seq) {
 		bool fragstolen;
 
+		/* 尝试进行分段合并 */
 		if (!tcp_try_coalesce(sk, skb1, skb, &fragstolen)) {
 			__skb_queue_after(&tp->out_of_order_queue, skb1, skb);
 		} else {
+			/* 尝试增加窗口通告 */
 			tcp_grow_window(sk, skb);
+			/* 合并成功，释放skb*/
 			kfree_skb_partial(skb, fragstolen);
 			skb = NULL;
 		}
@@ -4291,6 +4462,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* Find place to insert this segment. */
+	/* 查找这个ofo包的添加位置 */
 	while (1) {
 		if (!after(TCP_SKB_CB(skb1)->seq, seq))
 			break;
@@ -4302,7 +4474,9 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* Do skb overlap to previous one? */
+	/* 检测重传包   RFC2883*/
 	if (skb1 && before(seq, TCP_SKB_CB(skb1)->end_seq)) {
+		/* 序号所有部分都已经在当前节点 */
 		if (!after(end_seq, TCP_SKB_CB(skb1)->end_seq)) {
 			/* All the bits are present. Drop. */
 			NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFOMERGE);
@@ -4311,11 +4485,14 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 			tcp_dsack_set(sk, seq, end_seq);
 			goto add_sack;
 		}
+		/* 存在重叠 则不进行插入  ，状态置位*/
 		if (after(seq, TCP_SKB_CB(skb1)->seq)) {
 			/* Partial overlap. */
+		/* 设置重叠部分dsack */
 			tcp_dsack_set(sk, seq,
 				      TCP_SKB_CB(skb1)->end_seq);
 		} else {
+			/* 不是重包  ，将包插入到队列中 */
 			if (skb_queue_is_first(&tp->out_of_order_queue,
 					       skb1))
 				skb1 = NULL;
@@ -4331,6 +4508,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 		__skb_queue_after(&tp->out_of_order_queue, skb1, skb);
 
 	/* And clean segments covered by new one as whole. */
+	/* 部分重传段进行处理 */
 	while (!skb_queue_is_last(&tp->out_of_order_queue, skb)) {
 		skb1 = skb_queue_next(&tp->out_of_order_queue, skb);
 
@@ -4342,6 +4520,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 			break;
 		}
 		__skb_unlink(skb1, &tp->out_of_order_queue);
+		/* 扩展套接口SACK设置 */
 		tcp_dsack_extend(sk, TCP_SKB_CB(skb1)->seq,
 				 TCP_SKB_CB(skb1)->end_seq);
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFOMERGE);
@@ -4434,14 +4613,18 @@ err:
 
 static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 {
+	/* 如果这个报文是待接收的报文（看seq），进入receive队列或者直接拷贝到用户内存中 */
 	struct tcp_sock *tp = tcp_sk(sk);
 	int eaten = -1;
 	bool fragstolen = false;
 
-	if (TCP_SKB_CB(skb)->seq == TCP_SKB_CB(skb)->end_seq)
+	 /* 无数据 */
+	 if (TCP_SKB_CB(skb)->seq == TCP_SKB_CB(skb)->end_seq)
 		goto drop;
 
-	skb_dst_drop(skb);
+	/* 删除路由缓存 */
+	 skb_dst_drop(skb);
+	/* 去掉tcp首部 */
 	__skb_pull(skb, tcp_hdr(skb)->doff * 4);
 
 	tcp_ecn_accept_cwr(tp, skb);
@@ -4452,49 +4635,71 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 	 *  Packets in sequence go to the receive queue.
 	 *  Out of sequence packets to the out_of_order_queue.
 	 */
+	 /* 预期接收的数据段 */
 	if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt) {
+		 /* 窗口为0，不能接收数据 */
 		if (tcp_receive_window(tp) == 0)
 			goto out_of_window;
 
 		/* Ok. In sequence. In window. */
+		/* 进程上下文 */
+
+		 /* 当前进程读取数据 */
 		if (tp->ucopy.task == current &&
+			/* 用户空间读取序号与接收序号一致&& 需要读取的数据不为0 */
 		    tp->copied_seq == tp->rcv_nxt && tp->ucopy.len &&
+		    /* 被用户空间锁定&& 无紧急数据 */
 		    sock_owned_by_user(sk) && !tp->urg_data) {
+		    /* 带读取长度和数据段长度的较小值 */
 			int chunk = min_t(unsigned int, skb->len,
 					  tp->ucopy.len);
 
+			/* 设置running状态 */
 			__set_current_state(TASK_RUNNING);
 
+			/* 拷贝数据 */
 			local_bh_enable();
 			if (!skb_copy_datagram_iovec(skb, 0, tp->ucopy.iov, chunk)) {
 				tp->ucopy.len -= chunk;
 				tp->copied_seq += chunk;
+				/* 完整读取了该数据段 */
 				eaten = (chunk == skb->len);
+				/* 调整接收缓存和窗口 */
 				tcp_rcv_space_adjust(sk);
 			}
 			local_bh_disable();
 		}
 
+		/* 未拷贝到用户空间或者未拷贝完整数据段 */
 		if (eaten <= 0) {
 queue_and_out:
+			/* 没有拷贝到用户空间，对内存进行检查 */
 			if (eaten < 0 &&
 			    tcp_try_rmem_schedule(sk, skb, skb->truesize))
 				goto drop;
 
+			/* 添加到接收队列 */
 			eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
 		}
+		/* 更新下一个期望接收的序号*/
 		tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+		 /* 有数据 */
 		if (skb->len)
 			tcp_event_data_recv(sk, skb);
+		/* 标记有fin，则处理 */
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
 			tcp_fin(sk);
 
+		/* out_of_order队列有数据，则处理 */
 		if (!skb_queue_empty(&tp->out_of_order_queue)) {
+
+			/* 将out_of_order队列中的数据段转移到receive队列 */
 			tcp_ofo_queue(sk);
 
 			/* RFC2581. 4.2. SHOULD send immediate ACK, when
 			 * gap in queue is filled.
 			 */
+			/* 乱序数据段处理完毕，需要立即发送ack */
 			if (skb_queue_empty(&tp->out_of_order_queue))
 				inet_csk(sk)->icsk_ack.pingpong = 0;
 		}
@@ -4502,32 +4707,41 @@ queue_and_out:
 		if (tp->rx_opt.num_sacks)
 			tcp_sack_remove(tp);
 
+		/* 快路检查 */
 		tcp_fast_path_check(sk);
 
+		/* 向用户空间拷贝了数据，则释放skb */
 		if (eaten > 0)
 			kfree_skb_partial(skb, fragstolen);
+		/* 不在销毁状态，则唤醒进程读取数据 */
 		if (!sock_flag(sk, SOCK_DEAD))
 			sk->sk_data_ready(sk);
 		return;
 	}
 
+	/* 重传 */
 	if (!after(TCP_SKB_CB(skb)->end_seq, tp->rcv_nxt)) {
 		/* A retransmit, 2nd most common case.  Force an immediate ack. */
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_DELAYEDACKLOST);
 		tcp_dsack_set(sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
 
 out_of_window:
+		/* 进入快速ack模式 */
 		tcp_enter_quickack_mode(sk, TCP_MAX_QUICKACKS);
+		/*  调度ack */
 		inet_csk_schedule_ack(sk);
 drop:
+		/* 释放skb */
 		__kfree_skb(skb);
 		return;
 	}
 
 	/* Out of window. F.e. zero window probe. */
+	/* 窗口以外的数据，比如零窗口探测报文段 */
 	if (!before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt + tcp_receive_window(tp)))
 		goto out_of_window;
 
+	/* 数据段重叠 */
 	if (before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt)) {
 		/* Partial packet, seq < rcv_next < end_seq */
 		SOCK_DEBUG(sk, "partial packet: rcv_next %X seq %X - %X\n",
@@ -4539,11 +4753,13 @@ drop:
 		/* If window is closed, drop tail of packet. But after
 		 * remembering D-SACK for its head made in previous line.
 		 */
+		/* 窗口为0，不能接收 */
 		if (!tcp_receive_window(tp))
 			goto out_of_window;
 		goto queue_and_out;
 	}
 
+	 /* 接收乱序数据段 */
 	tcp_data_queue_ofo(sk, skb);
 }
 
@@ -4570,6 +4786,7 @@ static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
  * Segments with FIN/SYN are not collapsed (only because this
  * simplifies code)
  */
+ /* 缩小skb，减少开支 */
 static void
 tcp_collapse(struct sock *sk, struct sk_buff_head *list,
 	     struct sk_buff *head, struct sk_buff *tail,
@@ -4688,14 +4905,20 @@ static void tcp_collapse_ofo_queue(struct sock *sk)
 
 		/* Segment is terminated when we see gap or when
 		 * we are at the end of all the queue. */
+		 /* skb为空队列 */
 		if (!skb ||
+			/* 下一个节点的开始序号在end段结尾之后（红黑树右侧情况） */
 		    after(TCP_SKB_CB(skb)->seq, end) ||
+		    /* 下一个节点的结束序号在start段开始之前（树左侧） */
 		    before(TCP_SKB_CB(skb)->end_seq, start)) {
+		    /* 标志着序号已经不连续，内核将合并head到skb之间的节点数据，
+		    这些数据位于序列号start到end之间。并且，以skb开始另一段新的连续序号查找。*/
 			/* Do not attempt collapsing tiny skbs */
 			if (range_truesize != head->truesize ||
 			    end - start >= SKB_WITH_OVERHEAD(SK_MEM_QUANTUM)) {
+				/* 将sk_receive_queue队列中的数据折叠到少量的skb结构中 */
 				tcp_collapse(sk, &tp->out_of_order_queue,
-					     head, skb, start, end);
+				head, skb, start, end);
 			} else {
 				sum_tiny += range_truesize;
 				if (sum_tiny > sk->sk_rcvbuf >> 3)
@@ -4710,8 +4933,11 @@ static void tcp_collapse_ofo_queue(struct sock *sk)
 			end = TCP_SKB_CB(skb)->end_seq;
 			range_truesize = skb->truesize;
 		} else {
+			/* 如果下一个节点与上一个阶段的序号有重叠，
+			下一个节点的开始序号位于start段开始序号之前，更新start的值 */
 			if (before(TCP_SKB_CB(skb)->seq, start))
 				start = TCP_SKB_CB(skb)->seq;
+			/* 下一个节点的结束序号在end段结束序号之后，更新end的值 */
 			if (after(TCP_SKB_CB(skb)->end_seq, end))
 				end = TCP_SKB_CB(skb)->end_seq;
 		}
@@ -4767,6 +4993,7 @@ static int tcp_prune_queue(struct sock *sk)
 	if (atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf)
 		return 0;
 
+	/* 合并out_of_order_queue队列中的重复数据 */
 	tcp_collapse_ofo_queue(sk);
 	if (!skb_queue_empty(&sk->sk_receive_queue))
 		tcp_collapse(sk, &sk->sk_receive_queue,
@@ -5045,6 +5272,12 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 	struct tcp_sock *tp = tcp_sk(sk);
 
 	/* RFC1323: H1. Apply PAWS check first. */
+	/*
+	 * 调用tcp_fast_parse_options()解析TCP选项，并检查时间戳
+	 * 选项。如果首部中存在时间戳，但PAWS校验失败，
+	 * 并且不存在RST标志则还还需发送DACK给对端，说明
+	 * 接收到的TCP段已确认过，然后丢弃该数据包
+	 */
 	if (tcp_fast_parse_options(skb, th, tp) && tp->rx_opt.saw_tstamp &&
 	    tcp_paws_discard(sk, skb)) {
 		if (!th->rst) {
@@ -5056,6 +5289,13 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 	}
 
 	/* Step 1: check sequence number */
+	/*
+	 * 调用tcp_sequence()检测接收到的段序号是否在
+	 * 接收窗口内，如果不是，则丢弃该数据包。
+	 * 如果不是复位段(TCP首部中有RST标志)则还
+	 * 需发送DACK给对端，说明接收到的TCP段不在
+	 * 接收窗口内。
+	 */
 	if (!tcp_sequence(tp, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq)) {
 		/* RFC793, page 37: "In all states except SYN-SENT, all reset
 		 * (RST) segments are validated by checking their SEQ-fields."
@@ -5072,6 +5312,10 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 	}
 
 	/* Step 2: check RST bit */
+	/*
+	 * 如果接收的段是复位段，则处理完
+	 * 复位后丢弃该段。
+	 */
 	if (th->rst) {
 		/* RFC 5961 3.2 :
 		 * If sequence number exactly matches RCV.NXT, then
@@ -5086,10 +5330,18 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 		goto discard;
 	}
 
+	/*
+	 * 如果TCP首部中存在时间戳选项且有效，
+	 * 则保存该时间戳
+	 */
 	/* step 3: check security and precedence [ignored] */
 
 	/* step 4: Check for a SYN
 	 * RFC 5691 4.2 : Send a challenge ack
+	 */
+	/*
+	 * 已建立连接的TCP接收到SYN段，则说明对端
+	 * 发送了错误的信息，调用tcp_reset()作复位处理。
 	 */
 	if (th->syn) {
 syn_challenge:
@@ -5129,6 +5381,10 @@ discard:
  *	The first three cases are guaranteed by proper pred_flags setting,
  *	the rest is checked inline. Fast processing is turned on in
  *	tcp_data_queue when everything is OK.
+ */
+/*
+ * 如果传输控制块的状态为TCP_ESTABLISHED，则
+ * 调用tcp_rcv_established()接收处理。
  */
  /*处理过程根据首部预测字段分为快速路径和慢速路径*/
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
@@ -5358,7 +5614,11 @@ discard:
 	__kfree_skb(skb);
 }
 EXPORT_SYMBOL(tcp_rcv_established);
-
+/*
+ * 在SYN_SENT状态下接收到的段,除紧急数据外其他的都由
+ * tcp_rcv_state_process()处理,以下代码显示的是SYN_SENT状态下接
+ * 收处理SYN+ACK段的情况.
+ */ //客户端发送SYN后，收到SYN+ACK或者对端SYN(也就是两端同时发送SYN)的情况。
 void tcp_finish_connect(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -5386,13 +5646,20 @@ void tcp_finish_connect(struct sock *sk, struct sk_buff *skb)
 
 	tcp_init_buffer_space(sk);
 
-	if (sock_flag(sk, SOCK_KEEPOPEN))
-		inet_csk_reset_keepalive_timer(sk, keepalive_time_when(tp));
+		/*
+		 * 如果启用了连接保活，则启用连接保活
+		 * 定时器。
+		 */
+		if (sock_flag(sk, SOCK_KEEPOPEN))
+			inet_csk_reset_keepalive_timer(sk, keepalive_time_when(tp));
 
-	if (!tp->rx_opt.snd_wscale)
-		__tcp_fast_path_on(tp, tp->snd_wnd);
-	else
-		tp->pred_flags = 0;
+		/*
+		 * 设置首部预测标志。
+		 */
+		if (!tp->rx_opt.snd_wscale)
+			__tcp_fast_path_on(tp, tp->snd_wnd);
+		else
+			tp->pred_flags = 0;
 
 }
 
@@ -5528,8 +5795,8 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		if (tp->rx_opt.saw_tstamp) {
 			tp->rx_opt.tstamp_ok	   = 1;
 			tp->tcp_header_len =
-				sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED;
-			tp->advmss	    -= TCPOLEN_TSTAMP_ALIGNED;
+				sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED;//如果在协商的时候TCP选项字段中支持时间戳选项，则以后的报文中都会带这个选项，所以tcp长度一直加了这个值
+			tp->advmss	    -= TCPOLEN_TSTAMP_ALIGNED;//减这个是因为报文里面一直多了时间搓选项
 			tcp_store_ts_recent(tp);
 		} else {
 			tp->tcp_header_len = sizeof(struct tcphdr);
@@ -5673,7 +5940,7 @@ reset_and_undo:
  *	It's called from both tcp_v4_rcv and tcp_v6_rcv and should be
  *	address independent.
  */
-
+//这里说明在连接建立的过程中只能是客户端收到SYN+ACK,或者是服务器端收到SYN。连接断开的过程也会走到这里面
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 			  const struct tcphdr *th, unsigned int len)
 {
@@ -5690,16 +5957,23 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 	case TCP_CLOSE:
 		goto discard;
 
+	/* 服务器端收到SYN */
 	case TCP_LISTEN:
+		/* 若ack置位此时连接尚未开始建立，丢包 */
 		if (th->ack)
 			return 1;
-
+		/* 若rst置位，丢包 */
 		if (th->rst)
 			goto discard;
 
 		if (th->syn) {
 			if (th->fin)
 				goto discard;
+		    /*处理SYN段，主要由conn_request接口(TCP中为tcp_v4_conn_request)处理，
+			icsk_af_ops成员在创建套接字时被初始化，参见tcp_v4_init_sock()收到三次握手的第一步SYN，
+            则在tcp_v4_conn_request中创建连接请求控制块request_sock
+            */
+			/*icsk->icsk_af_ops指向 ipv4_specific.conn_request = tcp_v4_conn_request */
 			if (icsk->icsk_af_ops->conn_request(sk, skb) < 0)
 				return 1;
 
@@ -5725,16 +5999,28 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 		}
 		goto discard;
 
+	/* 客户端收到SYN+ACK */
 	case TCP_SYN_SENT:
+		/*对于TCP_SYN_SENT状态的sock，会调用tcp_rcv_synsent_state_process来进行处理
+		解析tcp选项，获取服务端的支持情况， 比如sack, TFO, wscale, MSS， timestamp等
+		如果有ack， 进行tcp_ack， 这时候可能fastopen确认了之前的数据
+		调用tcp_finish_connect，TCP_SYN_SENT->TCP_ESTABLISHED
+		如果包含fastopen cookie则保存判断是否需要立即ack还是延时ack
+		如果包里没有ack，只有syn，则表示相互connect， TCP_SYN_SENT->TCP_SYN_RECV, 并发送synack */
 		queued = tcp_rcv_synsent_state_process(sk, skb, th, len);
 		if (queued >= 0)
 			return queued;
 
 		/* Do step6 onward by hand. */
+		/*
+		 * 在处理了SYN_SENT状态下接收到的段之后,还
+		 * 需处理紧急数据,然后释放该段,最后检测是
+		 * 否有数据需要发送.
+		 */
 		tcp_urg(sk, skb, th);
 		__kfree_skb(skb);
 		tcp_data_snd_check(sk);
-		return 0;
+		return 0;//注意这里返回出去了
 	}
 
 	req = tp->fastopen_rsk;
@@ -5751,10 +6037,17 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 
 	if (!tcp_validate_incoming(sk, skb, th, 0))
 		return 0;
-
+	/* 处理TCP段ACK标志，tcp_ack()返回非零值表示处理ACK段成功，是正常的第三次握手TCP段*/
 	/* step 5: check the ACK field */
+	/* 检查是否接受这个ack包 */
 	acceptable = tcp_ack(sk, skb, FLAG_SLOWPATH |
 				      FLAG_UPDATE_TS_RECENT) > 0;
+	/*tcp_rcv_state_process函数中对于ack的处理步骤中，假如连接处于FIN_WAIT_1，
+	且数据均已经被确认完，则进入TIME_WAIT_2状态；如果无需在该状态等待（linger2<0），
+	或者收到了乱序数据段，则直接关闭连接；如果需要等待，
+	则需要判断等待时间与TIMEWAIT时间的大小关系，若>TIMEWAIT_LEN，
+	则添加TIME_WAIT_2定时器，否则直接进入TIME_WAIT接管(其子状态仍然是FIN_WAIT_2)，
+	接管之后会添加TIME_WAIT定时器*/
 
 	switch (sk->sk_state) {
 	case TCP_SYN_RECV:
@@ -5786,9 +6079,17 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 		 * Passively open sockets are not waked up, because
 		 * sk->sk_sleep == NULL and sk->sk_socket == NULL.
 		 */
+				/*
+				 * 发信号给那些将通过该套接字发送数据的进程，
+				 * 通知他们套接字目前已经可以发送数据了
+				 */
 		if (sk->sk_socket)
 			sk_wake_async(sk, SOCK_WAKE_IO, POLL_OUT);
 
+                /*
+				 * 初始化传输控制块各字段，如果存在时间戳选项，
+				 * 同时平滑RTT为零，则需计算重传超时时间等
+				 */
 		tp->snd_una = TCP_SKB_CB(skb)->ack_seq;
 		tp->snd_wnd = ntohs(th->window) << tp->rx_opt.snd_wscale;
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
@@ -5806,16 +6107,26 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 			 * retransmitting any data sooner based on when they
 			 * are sent out.
 			 */
-			tcp_rearm_rto(sk);
-		} else
+				/*
+				 * 为该套接字建立路由，初始化拥塞控制模块
+				 */
 			tcp_init_metrics(sk);
 
 		tcp_update_pacing_rate(sk);
 
 		/* Prevent spurious tcp_cwnd_restart() on first data packet */
+	   /*
+		* 更新最近一次发送数据包的时间
+		*/
 		tp->lsndtime = tcp_time_stamp;
 
+        /*
+		 * 初始化与路径MTU有关的成员
+		 */
 		tcp_initialize_rcv_mss(sk);
+		/*
+		 * 计算有关TCP首部预测的标志
+		 */
 		tcp_fast_path_on(tp);
 		break;
 
@@ -5844,19 +6155,44 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 		if (tp->snd_una != tp->write_seq)
 			break;
 
-		tcp_set_state(sk, TCP_FIN_WAIT2);
+	    /*
+		 * 如果通过ACK的确认，所有的发送
+		 * 段(包括FIN段)对方都已收到，则
+		 * 从FIN_WAIT1状态迁移到FIN_WAINT2状态，
+		 * 并关闭发送方向的连接。
+		 */
+		tcp_set_state(sk, TCP_FIN_WAIT2);//这里设置里进入WAIT2状态
 		sk->sk_shutdown |= SEND_SHUTDOWN;
 
+		/*
+		 * 因为从对端接收到ACK段，因此可以
+		 * 确认此路由缓存有效
+		 */
 		dst = __sk_dst_get(sk);
 		if (dst)
 			dst_confirm(dst);
 
 		if (!sock_flag(sk, SOCK_DEAD)) {
 			/* Wake up lingering close() */
+			/*
+			 * 如果套接字不在SOCK_DEAD状态，由于
+			 * TCP状态发生了变化，因此唤醒那些
+			 * 等待本套接字的进程.
+			 * 这里应该是唤醒tcp_close()中设置了SOCK_LINGER标志后
+			 * 需要等待的进程。
+			 */
 			sk->sk_state_change(sk);
 			break;
 		}
 
+            /*
+			 * 如果套接字处于SOCK_DEAD状态，则需
+			 * 关闭传输控制块，或者在FIN_WAIT2
+			 * 状态等待。
+			 * 如果linger2小于0，则说明无需在
+			 * FIN_WAIT2状态等待，直接关闭传输
+			 * 控制块
+			 */
 		if (tp->linger2 < 0 ||
 		    (TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq &&
 		     after(TCP_SKB_CB(skb)->end_seq - th->fin, tp->rcv_nxt))) {
@@ -5865,9 +6201,15 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 			return 1;
 		}
 
+        /*
+         * sock结构进入TIME_WAIT状态有两种情况：一种是在真正进入了TIME_WAIT状态，还有一种是真实的状态是FIN_WAIT_2的TIME_WAIT状态。
+         * 之所以让FIN_WAIT_2状态在没有接收到FIN包的情况下也可以进入TIME_WAIT状态是因为tcp_sock结构占用的资源要比tcp_timewait_sock
+         * 结构占用的资源多，而且在TIME_WAIT下也可以处理连接的关闭。
+         */
 		tmo = tcp_fin_time(sk);
+		//这里说明了:主动关闭的一端在等待三次握手中的第三步FIN的时候，不会永远等待，如果对端等tmo还没发送FIN过来，则直接进入time_wait定时器tcp_time_wait(这里面会把之前的sk释放掉，用心的timewait_sock替换)超时阶段
 		if (tmo > TCP_TIMEWAIT_LEN) {
-			inet_csk_reset_keepalive_timer(sk, tmo - TCP_TIMEWAIT_LEN);
+			inet_csk_reset_keepalive_timer(sk, tmo - TCP_TIMEWAIT_LEN);//超过TCP_TIMEWAIT_LEN的时间在keepalive中实现，然后在在该keepalive定时器回调中进入tcp_time_wait
 		} else if (th->fin || sock_owned_by_user(sk)) {
 			/* Bad case. We could lose such FIN otherwise.
 			 * It is not a big problem, but it looks confusing
@@ -5877,13 +6219,18 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 			 */
 			inet_csk_reset_keepalive_timer(sk, tmo);
 		} else {
-			tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
+			tcp_time_wait(sk, TCP_FIN_WAIT2, tmo); //本端发送的fin已经收到确认，等待对方发送fin
 			goto discard;
 		}
 		break;
 	}
 
 	case TCP_CLOSING:
+	    /*
+		 * 如果通过ACK确认，所有的发送段(包括
+		 * FIN段)对方都已经收到，则从CLOSING状态
+		 * 迁移到TIME_WAIT状态，作2MSL超时等待
+		 */
 		if (tp->snd_una == tp->write_seq) {
 			tcp_time_wait(sk, TCP_TIME_WAIT, 0);
 			goto discard;
@@ -5891,6 +6238,12 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 		break;
 
 	case TCP_LAST_ACK:
+	    /*
+		 * 如果通过ACK确认，所有的发送段(包括FIN段)
+		 * 对方都已经收到，则从LAST_ACK状态迁移到
+		 * CLOSE状态，把相关的metrics更新到目的路由项
+		 * 中，并关闭传输控制块。
+		 */
 		if (tp->snd_una == tp->write_seq) {
 			tcp_update_metrics(sk);
 			tcp_done(sk);
@@ -5900,15 +6253,29 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 	}
 
 	/* step 6: check the URG bit */
+	/*
+	 * 处理带外数据
+	 */
 	tcp_urg(sk, skb, th);
 
 	/* step 7: process the segment text */
+	/*
+	 * 对于CLOSE_WAIT、CLOSING和LAST_ACK这三种状态，如果
+	 * 接收到已经确认过的段，则直接丢弃，否则与
+	 * FIN_WAIT1和FIN_WAIT2状态的处理方式一样。
+	 */
 	switch (sk->sk_state) {
 	case TCP_CLOSE_WAIT:
 	case TCP_CLOSING:
 	case TCP_LAST_ACK:
 		if (!before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt))
 			break;
+
+    /*
+	 * 如果接收方向已关闭，而又接收到新的数据，
+	 * 则需给对端发送RST段，说明接收方已丢弃了
+	 * 该数据。
+	 */
 	case TCP_FIN_WAIT1:
 	case TCP_FIN_WAIT2:
 		/* RFC 793 says to queue data in these states,
@@ -5930,6 +6297,11 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
 		break;
 	}
 
+    /*
+	 * 如果TCP不处在CLOSE状态，则发送队列
+	 * 中的段，同时调度ACK，确定是否立即
+	 * 发送ACK还是延时发送。
+	 */
 	/* tcp_data could move socket to TIME-WAIT */
 	if (sk->sk_state != TCP_CLOSE) {
 		tcp_data_snd_check(sk);
@@ -6001,6 +6373,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct dst_entry *dst = NULL;
 	__u32 isn = TCP_SKB_CB(skb)->tcp_tw_isn;
+	//在第三步收到ACK的时候在tcp_v4_hnd_req中的cookie_v4_check对之前发送的ack+syn进行检查，检查过程见cookie_v4_check
 	bool want_cookie = false, fastopen;
 	struct flowi fl;
 	struct tcp_fastopen_cookie foc = { .len = -1 };
@@ -6011,9 +6384,22 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	 * limitations, they conserve resources and peer is
 	 * evidently real one.
 	 */
+	 /*
+	 * 如果SYN请求连接队列已满并且isn为零，则需做特别处理。
+	 * 这里的isn就是TCP_SKB_CB(skb)->when，而TCP_SKB_CB(skb)->when
+	 * 在TCP接收处理一开始就被清零，因此这里isn为零总是成立
+	 */
 	if ((sysctl_tcp_syncookies == 2 ||
 	     inet_csk_reqsk_queue_is_full(sk)) && !isn) {
+	    /*
+		 * 如果启用了syncookies(CONFIG_SYN_COOKIES有定义)，则设置启用syncookies标志，
+		 * 以便在后续的处理中使用syncookies规则来处理
+		 */
 		want_cookie = tcp_syn_flood_action(sk, skb, rsk_ops->slab_name);
+		/*
+		 * 如果没有启用syncookies，则此时不能再接收新的SYN连接请求，
+		 * 只能丢弃
+		 */
 		if (!want_cookie)
 			goto drop;
 	}
@@ -6024,38 +6410,95 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	 * clogging syn queue with openreqs with exponentially increasing
 	 * timeout.
 	 */
+	/*
+	 * 如果连接队列长度已达到上限且SYN请求队列中至少有一个握手过程中
+	 * 没有重传过的段，则丢弃当前连接请求.
+	 *  如果半连接队列中未重传的请求块数量大于1，
+	 * 则表示未来可能有2个完成的连接，这些新完成
+	 * 的连接要放到连接队列中，但此时连接队列已满
+	 * 。如果在接收到三次握手中最后的ACK后连接队列
+	 * 中没有空闲的位置，会忽略接收到的ACK包，连接
+	 * 建立会推迟，所以此时最好丢掉部分新的连接请
+	 * 求，空出资源以完成正在进行的连接建立过程。
+	 * 还要注意，这个判断并没有考虑半连接队列是否
+	 * 已满的问题。从这里可以看出，即使开启了
+	 * SYN cookies机制并不意味着一定可以完成连接的建立。
+	 * 
+	 */
 	if (sk_acceptq_is_full(sk) && inet_csk_reqsk_queue_young(sk) > 1) {
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
 		goto drop;
 	}
-
+	
+	/*
+	 * 可以接收并处理连接请求，调用inet_reqsk_alloc()分配一个连接请求
+	 * 块，用于保存连接请求信息，同时初始化在建立连接过程中用来发送
+	 * ACK、RST段的操作集合，以便在建立连接过程中能方便地调用这些接口
+	 * 注意: 这个函数将连接状态更新为TCP_NEW_SYN_RECV 
+	 *  ireq->ireq_state = TCP_NEW_SYN_RECV
+	 */
 	req = inet_reqsk_alloc(rsk_ops);
 	if (!req)
 		goto drop;
 
-	tcp_rsk(req)->af_specific = af_ops;
+	/*
+	 * 通过TCP MD5签名来保护BGP会话(RFC2385)操作
+ 	 */
+ 	tcp_rsk(req)->af_specific = af_ops;
 
+	/*
+	 * 清除TCP选项后初始化mss_clamp和user_mss。
+	 */
 	tcp_clear_options(&tmp_opt);
 	tmp_opt.mss_clamp = af_ops->mss_clamp;
 	tmp_opt.user_mss  = tp->rx_opt.user_mss;
+	
+	/*
+	 * 解析SYN段中的TCP选项
+	 */
 	tcp_parse_options(skb, &tmp_opt, 0, want_cookie ? NULL : &foc);
 
-	if (want_cookie && !tmp_opt.saw_tstamp)
+	/*
+	 * 如果启用了syncookies，并且最近一次接收到的TCP段(即当前的skb)
+	 * 不存在TCP时间戳选项，则清除已解析的TCP选项
+	 */
+	 if (want_cookie && !tmp_opt.saw_tstamp)
 		tcp_clear_options(&tmp_opt);
-
+	 /*
+	  * 初始化该连接中是否启用时间戳的选项tstamp_ok
+	  */
 	tmp_opt.tstamp_ok = tmp_opt.saw_tstamp;
-	tcp_openreq_init(req, &tmp_opt, skb, sk);
 
-	af_ops->init_req(req, sk, skb);
+	/*
+	 * 根据接收到SYN段中的选项和序号来初始化连接请求块信息
+	 */
+	 tcp_openreq_init(req, &tmp_opt, skb, sk);
 
-	if (security_inet_conn_request(sk, skb, req))
+	/*
+	 * 初始化TCP层次的连接请求信息块，包括目的地址、源地址，
+	 * 并调用tcp_v4_save_options从IP层私有控制块中获取IP
+	 * 选项保存到传输控制块的opt中，包括MSS、窗口扩大
+	 * 因子、显式拥塞通知等
+	 */
+	 af_ops->init_req(req, sk, skb);
+
+	/*
+	 * 如果安全检测失败，则丢弃该SYN段
+	 */
+	 if (security_inet_conn_request(sk, skb, req))
 		goto drop_and_free;
 
 	if (!want_cookie || tmp_opt.tstamp_ok)
 		tcp_ecn_create_request(req, skb, sk);
 
 	if (want_cookie) {
-		isn = cookie_init_sequence(af_ops, sk, skb, &req->mss);
+		/*
+		 * 如果启动了syncookies，则每60秒警告一次可能受
+		 * synflood攻击，同时由客户端IP地址、客户端端口、
+		 * 服务器IP地址、服务器端口、客户端初始序列号
+		 * 等要素经hash运算后加密得到服务端初始化序列号
+		 */
+		isn = cookie_init_sequence(af_ops, sk, skb, &req->mss);//如果开启了syncookie选项，则需要检查收到的第三步ack和这个isn值是否一致
 		req->cookie_ts = tmp_opt.tstamp_ok;
 	} else if (!isn) {
 		/* VJ's idea. We save last timestamp seen
@@ -6066,6 +6509,10 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 		 * If "isn" is not zero, this request hit alive
 		 * timewait bucket, so that all the necessary checks
 		 * are made in the function processing timewait state.
+		 */		
+		/*
+		 * 进入TIMEWAIT状态时，从对端信息块中获取时间戳，在新的
+		 * 连接请求之前检测PAWS
 		 */
 		if (tcp_death_row.sysctl_tw_recycle) {
 			bool strict;
@@ -6080,6 +6527,9 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 			}
 		}
 		/* Kill the following clause, if you dislike this way. */
+		/*
+		 * 未启动syncookies的情况下受到synflood攻击，则丢弃接收到的段
+		 */
 		else if (!sysctl_tcp_syncookies &&
 			 (sysctl_max_syn_backlog - inet_csk_reqsk_queue_len(sk) <
 			  (sysctl_max_syn_backlog >> 2)) &&
@@ -6096,7 +6546,10 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 				    rsk_ops->family);
 			goto drop_and_release;
 		}
-
+		/*
+		 * 由源地址、源端口号、目的地址以及目的端口计算出服务端
+		 * 初始序列号
+		 */
 		isn = af_ops->init_seq(skb);
 	}
 	if (!dst) {
@@ -6105,10 +6558,13 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 			goto drop_and_free;
 	}
 
+	/*
+	 * 将计算得到的初始序列号存放到连接请求阶段的传输控制块中
+	 */
 	tcp_rsk(req)->snt_isn = isn;
 	tcp_openreq_init_rwin(req, sk, dst);
 	fastopen = !want_cookie &&
-		   tcp_try_fastopen(sk, skb, req, &foc, dst);
+		   tcp_try_fastopen(sk, skb, req, &foc, dst);//验证后创建fastopen sock，并把数据部分放入接收队列中
 	err = af_ops->send_synack(sk, dst, &fl, req,
 				  skb_get_queue_mapping(skb), &foc);
 	if (!fastopen) {

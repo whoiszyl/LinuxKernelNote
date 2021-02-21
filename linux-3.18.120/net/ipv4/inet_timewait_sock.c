@@ -127,6 +127,15 @@ static void inet_twsk_add_bind_node(struct inet_timewait_sock *tw,
  * Essentially we whip up a timewait bucket, copy the relevant info into it
  * from the SK, and mess with hash chains and list linkage.
  */
+/*
+ * 将timewait控制块添加到tcp_hashinfo的ebash散列表中，
+ * 将被替代的TCP控制块从ehash散列表中删除。这样
+ * FIN_WAIT2和TIME_WAIT状态下也可以进行输入的处理。
+ * 同时将该timewait控制块添加到bhash散列表中，但
+ * 并不删除该散列表中被替代的TCP控制块，因为
+ * 只要inet->num不为0，这个绑定关系就存在，
+ * 即使该套接字已经关闭
+ */
 void __inet_twsk_hashdance(struct inet_timewait_sock *tw, struct sock *sk,
 			   struct inet_hashinfo *hashinfo)
 {
@@ -144,7 +153,9 @@ void __inet_twsk_hashdance(struct inet_timewait_sock *tw, struct sock *sk,
 	spin_lock(&bhead->lock);
 	tw->tw_tb = icsk->icsk_bind_hash;
 	WARN_ON(!icsk->icsk_bind_hash);
-	inet_twsk_add_bind_node(tw, &tw->tw_tb->owners);
+
+	//将inet_timewait_sock添加到
+	inet_twsk_add_bind_node(tw, &tw->tw_tb->owners);//讲inet_bind_bucket桶指向tw->tw_bind_node，避免该函数外面在释放sk的时候，会释放掉bind桶信息
 	spin_unlock(&bhead->lock);
 
 	spin_lock(lock);
@@ -159,10 +170,10 @@ void __inet_twsk_hashdance(struct inet_timewait_sock *tw, struct sock *sk,
 	 * committed into memory all tw fields.
 	 */
 	atomic_set(&tw->tw_refcnt, 1 + 1 + 1);
-	inet_twsk_add_node_rcu(tw, &ehead->chain);
+	inet_twsk_add_node_rcu(tw, &ehead->chain);//把新创建的inet_timewait_sock加入到inet_hash中的ehash中
 
 	/* Step 3: Remove SK from hash chain */
-	if (__sk_nulls_del_node_init_rcu(sk))
+	if (__sk_nulls_del_node_init_rcu(sk))//把sk从inet_hash中的ehash表中删除
 		sock_prot_inuse_add(sock_net(sk), sk->sk_prot, -1);
 
 	spin_unlock(lock);
@@ -212,6 +223,21 @@ struct inet_timewait_sock *inet_twsk_alloc(const struct sock *sk, const int stat
 EXPORT_SYMBOL_GPL(inet_twsk_alloc);
 
 /* Returns non-zero if quota exceeded.  */
+/*
+ * 删除cells散列表中当前关键字链表上的timewait控制块。
+ * 如果在inet_twdr_do_twkill_work()清理的timewait控制块数超过
+ * 100个，则说明还有一定量的timewait控制块需要处理。
+ * 而在定时器例程中处理，长时间不返回，会影响
+ * 系统性能，因此剩下的timewait控制块放在twkill_work
+ * 工作队列中处理。调度twkill_work工作队列前，先标识
+ * 待删除slot的位图，这样在twkill_work工作队列处理中，
+ * 根据thread_slots位图，处理cells散列表中相应的链表。
+ * inet_twdr_do_twkill_work()用来删除指定cells散列表中slot入口
+ * 链表中slot入口链表上的timewait控制块，然后将其释放，
+ * 最后更新系统中timewait控制块数。在删除过程中，
+ * 如果本次删除的个数达到100，则返回非零，表示
+ * 调用者需中断本次处理，重新调度。
+ */
 static int inet_twdr_do_twkill_work(struct inet_timewait_death_row *twdr,
 				    const int slot)
 {
@@ -259,6 +285,11 @@ rescan:
 	return ret;
 }
 
+/*
+ * tw_timer定时器的例程，该定时器超时后，会
+ * 遍历twcal_row散列表中当前关键字slot链表上的
+ * timewait控制块。
+ */
 void inet_twdr_hangman(unsigned long data)
 {
 	struct inet_timewait_death_row *twdr;
@@ -288,6 +319,15 @@ out:
 }
 EXPORT_SYMBOL_GPL(inet_twdr_hangman);
 
+/*
+ * twkill_work工作队列的例程，当tw_timer定时器例程中处理
+ * 的timewait控制块达到100个时，会调度twkill_work工作队列，
+ * 清理剩下的timewait控制块。
+ * 处理时会根据待删除slot的位图，删除对应slot链表上的
+ * timewait控制块，在twkill_work工作队列例程中每处理100个
+ * timewait控制块暂时睡眠，然后再次处理，直至全部处理
+ * 完成。
+ */
 void inet_twdr_twkill_work(struct work_struct *work)
 {
 	struct inet_timewait_death_row *twdr =
@@ -337,6 +377,17 @@ void inet_twsk_deschedule(struct inet_timewait_sock *tw,
 }
 EXPORT_SYMBOL(inet_twsk_deschedule);
 
+/*
+ * 用于启动FIN_WAIT_2或TIME_WAIT定时器。虽然
+ * 启动这两个定时器用的是同一个接口，但是
+ * 根据timewait控制块的tw_substate很明确地区别
+ * 当前启动的是哪个定时器
+ * @tw: 已经替代TCP传输控制块的timewait控制块
+ * @twdr: 管理相关的数据的容器，通常传入全局
+ *             变量tcp_death_row。
+ * @timeo: 设定定时器的超时时间
+ * @timewait_len: 超时时间上限，为TCP_TIMEWAIT_LEN。
+ */
 void inet_twsk_schedule(struct inet_timewait_sock *tw,
 		       struct inet_timewait_death_row *twdr,
 		       const int timeo, const int timewait_len)
@@ -417,6 +468,11 @@ void inet_twsk_schedule(struct inet_timewait_sock *tw,
 }
 EXPORT_SYMBOL_GPL(inet_twsk_schedule);
 
+/*
+ * twcal_timer定时器的例程，该定时器超时后，
+ * 会遍历twcal_row散列表，清除其中已超时
+ * 的timewait控制块
+ */
 void inet_twdr_twcal_tick(unsigned long data)
 {
 	struct inet_timewait_death_row *twdr;

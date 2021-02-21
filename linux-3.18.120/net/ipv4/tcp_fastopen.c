@@ -95,6 +95,9 @@ static bool __tcp_fastopen_cookie_gen(const void *path,
  *
  * XXX (TFO) - refactor when TCP_FASTOPEN_COOKIE_SIZE != AES_BLOCK_SIZE.
  */
+/*
+ * tcp_fastopen_cookie_gen主要对来源地址和目标地址，使用aes加密也就是fastopen是主机粒度的，并不区分服务
+ */
 static bool tcp_fastopen_cookie_gen(struct request_sock *req,
 				    struct sk_buff *syn,
 				    struct tcp_fastopen_cookie *foc)
@@ -269,16 +272,18 @@ bool tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
 	struct tcp_fastopen_cookie valid_foc = { .len = -1 };
 	bool syn_data = TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq + 1;
 
-	if (!((sysctl_tcp_fastopen & TFO_SERVER_ENABLE) &&
+	if (!((sysctl_tcp_fastopen & TFO_SERVER_ENABLE) &&//没有开启tfo或者，或者不需要tfo(不带数据)，或是fastopen队列满了
 	      (syn_data || foc->len >= 0) &&
 	      tcp_fastopen_queue_check(sk))) {
 		foc->len = -1;
 		return false;
 	}
 
+	//不验证cookie
 	if (syn_data && (sysctl_tcp_fastopen & TFO_SERVER_COOKIE_NOT_REQD))
 		goto fastopen;
 
+	//生成TFO cookie
 	if (tcp_fastopen_cookie_gen(req, skb, &valid_foc) &&
 	    foc->len == TCP_FASTOPEN_COOKIE_SIZE &&
 	    foc->len == valid_foc.len &&
@@ -292,6 +297,7 @@ bool tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
 		 * data in SYN_RECV state.
 		 */
 fastopen:
+		//创建新的sock，进入TCP_SYN_RECV状态
 		if (tcp_fastopen_create_child(sk, skb, dst, req)) {
 			foc->len = -1;
 			NET_INC_STATS_BH(sock_net(sk),

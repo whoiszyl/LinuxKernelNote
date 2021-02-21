@@ -85,7 +85,7 @@ void ip_options_build(struct sk_buff *skb, struct ip_options *opt,
  *
  * NOTE: dopt cannot point to skb.
  */
-
+//发送数据填充ip_options为函数ip_options_echo， 接收SKB中的IP选项字段为函数ip_options_compile
 int __ip_options_echo(struct ip_options *dopt, struct sk_buff *skb,
 		      const struct ip_options *sopt)
 {
@@ -252,7 +252,7 @@ static void spec_dst_fill(__be32 *spec_dst, struct sk_buff *skb)
  * Caller should clear *opt, and set opt->data.
  * If opt == NULL, then skb->data should point to IP header.
  */
-
+//发送数据填充ip_options为函数ip_options_echo， 接收SKB中的IP选项字段为函数ip_options_compile
 int ip_options_compile(struct net *net,
 		       struct ip_options *opt, struct sk_buff *skb)
 {

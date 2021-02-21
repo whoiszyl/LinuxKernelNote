@@ -363,6 +363,7 @@ static const struct file_operations ct_cpu_seq_fops = {
 	.release = seq_release_net,
 };
 
+//用于显示已建连接
 static int nf_conntrack_standalone_init_proc(struct net *net)
 {
 	struct proc_dir_entry *pde;
@@ -469,6 +470,7 @@ static struct ctl_table nf_ct_netfilter_table[] = {
 	{ }
 };
 
+//注册netfilter中的nf_conntrack_*中的相关proc sysctl文件，路径/proc/sys/net
 static int nf_conntrack_standalone_init_sysctl(struct net *net)
 {
 	struct ctl_table *table;
@@ -518,6 +520,7 @@ static void nf_conntrack_standalone_fini_sysctl(struct net *net)
 }
 #endif /* CONFIG_SYSCTL */
 
+//初始化conntrack相关变量及数据结构，已经proc/sys/net/xxx相关配置文件
 static int nf_conntrack_pernet_init(struct net *net)
 {
 	int ret;
@@ -562,6 +565,8 @@ static struct pernet_operations nf_conntrack_net_ops = {
 	.exit_batch	= nf_conntrack_pernet_exit,
 };
 
+//nf_conntrack的初始化，就是初始化上面提到的那些数据结构，它在内核启动时调用nf_conntrack_standalone_init()函数进行初始化的
+//参考:http://blog.csdn.net/ye_shizhe/article/details/17331947
 static int __init nf_conntrack_standalone_init(void)
 {
 	int ret = nf_conntrack_init_start();

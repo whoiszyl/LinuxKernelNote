@@ -31,6 +31,10 @@
 #include <net/netfilter/nf_log.h>
 #include "../../netfilter/xt_repldata.h"
 
+/*
+*ip_tables模块它是防火墙的核心模块，负责维护防火墙的规则表，通过这些规则，实现防火墙的核心功能。归纳起来，主要有三种功能：包过滤（filter）、
+*NAT以及包处理（mangle）。同进该模块留有与用户空间通讯的接口。
+*/
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
 MODULE_DESCRIPTION("IPv4 packet filter");
@@ -39,7 +43,7 @@ MODULE_DESCRIPTION("IPv4 packet filter");
 /*#define DEBUG_ALLOW_ALL*/ /* Useful for remote debugging */
 /*#define DEBUG_IP_FIREWALL_USER*/
 
-#ifdef DEBUG_IP_FIREWALL
+#ifdef DEBUG_IP_FIREWALL //只有打开这个开关后，dprintf才会打印
 #define dprintf(format, args...) pr_info(format , ## args)
 #else
 #define dprintf(format, args...)
@@ -71,6 +75,7 @@ EXPORT_SYMBOL_GPL(ipt_alloc_initial_table);
 
 /* Returns whether matches rule or not. */
 /* Performance critical - called for every packet */
+//匹配struct ipt_ip
 static inline bool
 ip_packet_match(const struct iphdr *ip,
 		const char *indev,
@@ -288,7 +293,9 @@ struct ipt_entry *ipt_next_entry(const struct ipt_entry *entry)
 	return (void *)entry + entry->next_offset;
 }
 
-/* Returns one of the generic firewall policies, like NF_ACCEPT. */
+/* Returns one of the generic firewall policies, like NF_ACCEPT.
+ *包过滤子功能：包过滤一共定义了四个hook函数，这四个hook函数本质最后都调用了ipt_do_table()函数。
+*/
 unsigned int
 /*函数参数：skb表示传输的数据包，hook表示哪一个钩子点处，in表示进来的网络设备接口，
 			out表示出去的网络设备接口，table表示哪一个模块的表。
@@ -375,7 +382,7 @@ ipt_do_table(struct sk_buff *skb,
 			acpar.match     = ematch->u.kernel.match;
 			acpar.matchinfo = ematch->data;
 			if (!acpar.match->match(skb, &acpar))
-				goto no_match;
+				goto no_match;//march失败，继续下一个ipt_entry
 		}
 
 		/* 这个宏用来分别处理字节计数器和分组计数器这两个计数器 */
@@ -763,7 +770,7 @@ check_entry_size_and_hooks(struct ipt_entry *e,
 		if (!(valid_hooks & (1 << h)))
 			continue;
 		if ((unsigned char *)e - base == hook_entries[h])
-			newinfo->hook_entry[h] = hook_entries[h];
+			newinfo->hook_entry[h] = hook_entries[h];//确定偏移量
 		if ((unsigned char *)e - base == underflows[h]) {
 			if (!check_underflow(e)) {
 				pr_debug("Underflows must be unconditional and "
@@ -803,8 +810,10 @@ cleanup_entry(struct ipt_entry *e, struct net *net)
 }
 
 /*
-translate_table函数将newinfo表示的table的各个规则进行边界检测，然后对于newinfo所指的
-ipt_table_info结构中的hook_entries和underflows赋予正确的值，最后将表项向其他CPU拷贝*/
+*entry0指向第一条规则，也就是newinfo里面的entries节点
+*translate_table函数将newinfo表示的table的各个规则进行边界检测，然后对于newinfo所指的
+*ipt_table_info结构中的hook_entries和underflows赋予正确的值，最后将表项向其他CPU拷贝
+*/
 /* Checks and translates the user-supplied table segment (held in
    newinfo) */
 static int
@@ -1947,6 +1956,14 @@ do_ipt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 	return ret;
 }
 
+
+/*
+*简而言之ipt_register_table()所做的事情就是从模板initial_table变量的repl成员里取出初始化数据，然后申请一块内存并用repl里的值来初始化它，
+*之后将这块内存的首地址赋给packet_filter表的private成员，最后将packet_filter挂载到xt[2].tables的双向链表中。
+*参考:(四)洞悉linux下的Netfilter&iptables：包过滤子系统iptable_filter
+*/
+////iptable netfilter表注册添加到该链表中   iptable_filter.ko里面用结构xt_table,该表现源从packet_filter来的           见xt_register_table
+//table头部:net->xt.tables[table->af],所有table的头部链表
 struct xt_table *ipt_register_table(struct net *net,
 				    const struct xt_table *table,
 				    const struct ipt_replace *repl)
@@ -2136,7 +2153,9 @@ static int __init ip_tables_init(void)
 	if (ret < 0)
 		goto err4;
 
-	/* Register setsockopt */
+	/* Register setsockopt
+     * nf_register_sockopt()为iptables注册一个socket option，这个option用于读或写iptable的配置：Linux的防火墙规则、NAT转换映射最终都是通过这个接口通知内核的。
+	*/
 	ret = nf_register_sockopt(&ipt_sockopts);
 	if (ret < 0)
 		goto err5;

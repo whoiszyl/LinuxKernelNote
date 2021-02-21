@@ -149,7 +149,7 @@ static const struct neigh_ops arp_direct_ops = {
 	.connected_output =	neigh_direct_output,
 };
 
-static const struct neigh_ops arp_broken_ops = {
+static const struct neigh_ops arp_broken_ops = {//邻居初始化的时候调用  在函数arp_constructor里面调用
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -157,6 +157,7 @@ static const struct neigh_ops arp_broken_ops = {
 	.connected_output =	neigh_compat_output,
 };
 
+//ARP全局变量，ARP缓存表 邻居表
 struct neigh_table arp_tbl = {
 	.family		= AF_INET,
 	.key_len	= 4,
@@ -219,6 +220,7 @@ static u32 arp_hash(const void *pkey,
 	return arp_hashfn(*(u32 *)pkey, dev, *hash_rnd);
 }
 
+//ARP邻居初始化函数，用来初始化新的neibour结构实例。在邻居表创建函数neibour_create中被调用  该函数在arp_tbl中初始化
 static int arp_constructor(struct neighbour *neigh)
 {
 	__be32 addr;
@@ -723,7 +725,7 @@ EXPORT_SYMBOL(arp_send);
 /*
  *	Process an arp request.
  */
-
+//这个是收到arp请求的时候给arp应答的时候会调用
 static int arp_process(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;

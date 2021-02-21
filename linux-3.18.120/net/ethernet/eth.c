@@ -180,7 +180,11 @@ EXPORT_SYMBOL(eth_get_headlen);
  * The rule here is that we
  * assume 802.3 if the type field is short enough to be a length.
  * This is normal practice and works for any 'now in use' protocol.
+ * L2数据帧有三种类型：单播，多播和广播，其中广播可看作多播的一种特殊情况。Bit 0用于表示多播还是单播，
+ * 当bit 0为1时，为多播，为0时，表示单播。
  */
+ //获取链路层协议类型  ETH_P_IP等 参考http://blog.csdn.net/magina3/article/details/7323265
+ //skb->protocol = eth_type_trans(skb, bp->dev);该函数对处理后skb>data跳过以太网报头，由mac_header指示以太网报头：http://www.linuxidc.com/Linux/2011-05/36065.htm
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
 	unsigned short _service_access_point;
@@ -192,11 +196,12 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	skb_pull_inline(skb, ETH_HLEN);
 	eth = eth_hdr(skb);
 
-	if (unlikely(is_multicast_ether_addr(eth->h_dest))) {
+	if (unlikely(is_multicast_ether_addr(eth->h_dest))) {   /* 如果是多播地址，即bit0为1*/
 		if (ether_addr_equal_64bits(eth->h_dest, dev->broadcast))
-			skb->pkt_type = PACKET_BROADCAST;
+			skb->pkt_type = PACKET_BROADCAST;// //与设备的广播地址相同，则帧为广播帧 
 		else
-			skb->pkt_type = PACKET_MULTICAST;
+			skb->pkt_type = PACKET_MULTICAST;//与设备的广播地址不同，则帧为多播帧
+        
 	}
 	else if (unlikely(!ether_addr_equal_64bits(eth->h_dest,
 						   dev->dev_addr)))
@@ -211,7 +216,11 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	if (unlikely(netdev_uses_dsa(dev)))
 		return htons(ETH_P_XDSA);
 
-	if (likely(ntohs(eth->h_proto) >= ETH_P_802_3_MIN))
+       /*
+        *当协议值大于136时，那么这个数据帧一定为ethernet frame 
+        *因为802.2和802.3的对应域为帧长，均要小于或等于1500，而ethernet frame的协议类型都大于等于1536.
+        */
+	if (likely(ntohs(eth->h_proto) >= ETH_P_802_3_MIN)) //> 0X600
 		return eth->h_proto;
 
 	/*
@@ -220,7 +229,9 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	 *      layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
 	 *      won't work for fault tolerant netware but does for the rest.
 	 */
-	sap = skb_header_pointer(skb, 0, sizeof(*sap), &_service_access_point);
+        /*
+         *当IPX使用原始的802.3作为载体时，其头两个字节作为checksum，但是一般都设为0xffff。 
+         */
 	if (sap && *sap == 0xFFFF)
 		return htons(ETH_P_802_3);
 
@@ -379,8 +390,8 @@ const struct header_ops eth_header_ops ____cacheline_aligned = {
  * @dev: network device
  *
  * Fill in the fields of the device structure with Ethernet-generic values.
- */
-void ether_setup(struct net_device *dev)
+ *///以太网设备配置函数
+void ether_setup(struct net_device *dev)  //修改mtu等参数，见net_device_ops，例如//以e100为例，见e100_netdev_ops
 {
 	dev->header_ops		= &eth_header_ops;
 	dev->type		= ARPHRD_ETHER;
@@ -410,7 +421,7 @@ EXPORT_SYMBOL(ether_setup);
  * size (sizeof_priv).  A 32-byte (not bit) alignment is enforced for
  * this private data area.
  */
-
+//这位以太网设备分配net_device结构，  //alloc_netdev分配好空间后，调用register_netdev完成注册，卸载的时候unregister_netdevice和free_netdev完成注销并释放内存
 struct net_device *alloc_etherdev_mqs(int sizeof_priv, unsigned int txqs,
 				      unsigned int rxqs)
 {
