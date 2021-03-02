@@ -37,9 +37,13 @@
 
 struct sock;
 
-struct inet_skb_parm {
+
+//通过IPCB访问这个           信息控制块inet_skb_parm结构存储在这里面  IP层用IPCB访问该结构，主要存储一些选项以及IP处理过程中的标志
+//这个是struct tcp_skb_cb的一部分，也就是说tcp_skb_cb包含IP选项以及TCP选项
+//TCP接收过程中的TCP选项字段从接收的SKB中解析出来，见tcp_parse_options，最终TCP选项字段存放在inet_request_sock中,IP选项字段存储在skb->cb中
+struct inet_skb_parm { //见樊东东P220       该结构中存用ip头部选项字段
 	struct ip_options	opt;		/* Compiled IP options		*/
-	unsigned char		flags;
+	unsigned char		flags; //flag取值为下面这几种
 
 #define IPSKB_FORWARDED		BIT(0)
 #define IPSKB_XFRM_TUNNEL_SIZE	BIT(1)
@@ -56,10 +60,31 @@ static inline unsigned int ip_hdrlen(const struct sk_buff *skb)
 	return ip_hdr(skb)->ihl * 4;
 }
 
+/*
+ * IP控制信息块由ipcm_cookie结构描述，
+ * 存储有关输出的控制信息，包括
+ * 发送UDP数据包的源地址、输出
+ * 网络设备接口索引以及IP首部中
+ * 的选项，在整个输出过程中起
+ * 传递信息的作用。
+ */ 
+ //UDP或者raw数据报相关
 struct ipcm_cookie {
+	/*
+	 * UDP数据包或RAW数据包的目的地址。
+	 * 只有当存在IP选项时才设置，用作
+	 * 源路由选项的最后一跳地址。
+	 */
 	__be32			addr;
+	/*
+	 * UDP数据包或RAW数据包的输出网络设备。
+	 */
 	int			oif;
-	struct ip_options_rcu	*opt;
+	/*
+	 * 如果不为NULL，则指向发送数据包的
+	 * IP选项信息。
+	 */
+	struct ip_options_rcu	*opt;//数据报的IP选项信息，也就是IP头部中的扩展添加信息。
 	__u8			tx_flags;
 	__u8			ttl;
 	__s16			tos;
@@ -238,8 +263,35 @@ static inline int inet_is_local_reserved_port(struct net *net, int port)
 __be32 inet_current_timestamp(void);
 
 /* From inetpeer.c */
+/*
+ * 用于计算垃圾回收最大时间间隔及对端
+ * 信息块生存期阈值。
+ * 当前对端信息块数量大于此阈值时，使用
+ * inet_peer_gc_mintime作为本次垃圾回收的时间间隔，
+ * 否则根据inet_peer_gc_maxtime计算本次垃圾回收的
+ * 时间间隔。
+ * 当前对端信息块数大于此阈值时，使用
+ * inet_peer_minttl作为本次垃圾回收的对端信息
+ * 块生存期的阈值，否则根据inet_peer_maxttl
+ * 计算本次垃圾回收对端信息块生存期
+ * 的阈值。该参数默认值会根据系统内存
+ * 大小动态调整，算法间inet_initpeers
+ */
 extern int inet_peer_threshold;
+/*
+ * 对端信息块的最短生存期。在有较大内存压力的
+ * 情况下(如对端信息块的数量超过inet_peer_threshold的时候)，
+ * 则使用inet_peer_minttl作为此次进行垃圾回收的对端信息
+ * 块生存期的阈值。默认值为120.
+ */
 extern int inet_peer_minttl;
+/*
+ * 对端信息块的最长生存期。在没有内存压力的
+ * 情况下(如对端信息块的数量很少时)，会使用
+ * 较长的时间作为此次进行垃圾回收的对端信息
+ * 块生存期的阈值，但不会大于inet_peer_maxttl。默认
+ * 值为600.
+ */
 extern int inet_peer_maxttl;
 
 /* From ip_input.c */

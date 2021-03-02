@@ -27,10 +27,12 @@ struct inetpeer_addr {
 	__u16				family;
 };
 
+//该结构为对端信息块结构，以v4addr为关键之，peer_root为跟，组织成AVL树。见樊东东P238
+//对端信息块主要用于组装ip数据包时防止分片攻击，在建立tcp连接时检测连接请求段是否有效以及其序列号是否回绕
 struct inet_peer {
 	/* group together avl_left,avl_right,v4daddr to speedup lookups */
-	struct inet_peer __rcu	*avl_left, *avl_right;
-	struct inetpeer_addr	daddr;
+	struct inet_peer __rcu	*avl_left, *avl_right;//用来将对端信息块组成AVL树。AVL树的根为peer_root。
+	struct inetpeer_addr	daddr;/* peer's address */
 	__u32			avl_height;
 
 	u32			metrics[RTAX_MAX];
@@ -54,7 +56,9 @@ struct inet_peer {
 	};
 
 	/* following fields might be frequently dirtied */
+	//记录该对端信息块引用计数为0的时间。 当闲置的时间超出指定的时间时， 就会被回收。
 	__u32			dtime;	/* the time of last use of not referenced entries */
+	//引用计数器，标识当前被使用的次数。 当引用计数为0，表示该对端信息块 没有被使用。
 	atomic_t		refcnt;
 };
 

@@ -72,12 +72,22 @@ struct udp_hslot {
  *	@mask:	number of slots in hash tables, minus 1
  *	@log:	log2(number of slots in hash table)
  */
+/*
+tcp udp和raw的hash
+union {
+        struct inet_hashinfo    *hashinfo; //tcp_hashinfo
+        struct udp_table    *udp_table; //udp_table
+        struct raw_hashinfo *raw_hash; //raw_v4_hashinfo
+    } h;
+*/
 struct udp_table {
 	struct udp_hslot	*hash;
 	struct udp_hslot	*hash2;
 	unsigned int		mask;
 	unsigned int		log;
 };
+//extern struct udp_table udp_table;
+//添加到udp_prot的.h.udp_table中， udp套接字的struct sock结构最终连接在该hash中  通过函数udp_v4_rehash添加把udp协议的struct udp_sock添加到udp_table,
 extern struct udp_table udp_table;
 void udp_table_init(struct udp_table *, const char *);
 static inline struct udp_hslot *udp_hashslot(struct udp_table *table,

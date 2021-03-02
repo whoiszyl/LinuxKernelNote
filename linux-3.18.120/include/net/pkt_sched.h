@@ -59,6 +59,7 @@ psched_tdiff_bounded(psched_time_t tv1, psched_time_t tv2, psched_time_t bound)
 	return min(tv1 - tv2, bound);
 }
 
+//见qdisc_watchdog_init
 struct qdisc_watchdog {
 	struct hrtimer	timer;
 	struct Qdisc	*qdisc;
@@ -103,8 +104,13 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 
 void __qdisc_run(struct Qdisc *q);
 
+/*
+上面看到了，发送队列被激活了，只要队列中有数据包待发送，队列总是处于激活状态，那么激活状态的队列是否能保证队列中的数据包被及时的发送吗？
+接下来看一下，激活状态的队列的特点。
+*/
 static inline void qdisc_run(struct Qdisc *q)
 {
+	//测试是否有其他例程正在运行本对象
 	if (qdisc_run_begin(q))
 		__qdisc_run(q);
 }

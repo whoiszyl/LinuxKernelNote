@@ -40,10 +40,15 @@ struct netns_ipvs;
 #define NETDEV_HASHBITS    8
 #define NETDEV_HASHENTRIES (1 << NETDEV_HASHBITS)
 
+//可以通过sock_net(skb->sk);获取
 struct net {
 	atomic_t		passive;	/* To decided when the network
 						 * namespace should be freed.
 						 */
+	/* 用于判断何时释放网络命名空间
+     * 在使用特定的net实例前后，需要分别调用
+     * 辅助函数get_net和put_net
+     */
 	atomic_t		count;		/* To decided when the network
 						 *  namespace should be shut down.
 						 */
@@ -54,6 +59,7 @@ struct net {
 #endif
 	spinlock_t		rules_mod_lock;
 
+	/* 网络命名空间的链接 */
 	struct list_head	list;		/* list of network namespaces */
 	struct list_head	cleanup_list;	/* namespaces on death row */
 	struct list_head	exit_list;	/* Use only net_mutex */
@@ -62,6 +68,13 @@ struct net {
 
 	unsigned int		proc_inum;
 
+	/*	由于每个命名空间都包含不同的网络设备，
+	 *	这必然会反映到procfs的内容上。
+	 *	各命名空间的处理需要三个数据项:
+	 *	/proc/net由proc_net表示，而/proc/net/stat由proc_net_stats
+	 *	表示，proc_net_root(现在已不用)指向当前命名空间的procfs实例
+	 *	的根节点,即/proc
+	 */
 	struct proc_dir_entry 	*proc_net;
 	struct proc_dir_entry 	*proc_net_stat;
 
@@ -72,8 +85,23 @@ struct net {
 	struct sock 		*rtnl;			/* rtnetlink socket */
 	struct sock		*genl_sock;
 
+    /* 与特定命名空间关联的所有设备都保存在
+     * 一个双向链表上，表头为dev_base_head 
+     */ //所有的net_device都添加到该链表中
+    //struct net_device会添加到struct net的下面的dev_base_head链表中，同时散列到dev_name_head和dev_index_head中,见樊东东上P72
+    //通过list_netdevice添加到该链表和下面的hash表中
+    //dev_getbyhwaddr   __dev_getfirstbyhwtype    dev_get_by_flags      通过for_each_netdev变量dev_base_head链表
+	//见list_netdevice 		   一般基于MAC地址或者设备类型就用该链表查找，基于接口名或者索引使用下面两个查找
 	struct list_head 	dev_base_head;//指向一个包含所有网络设备的链表
+	/*
+	 * 将设备名作为散列键的链表
+	 */
+	//dev_get_by_name
 	struct hlist_head 	*dev_name_head;//指向一个包含所有网络设备的散列表，键为网络设备名
+	/*
+	 * 将接口索引用作散列键
+	 */
+	//dev_get_by_index
 	struct hlist_head	*dev_index_head;//指向一个包含所有网络设备的散列表，键为网络设备索引
 	unsigned int		dev_base_seq;	/* protected by rtnl_mutex */
 	int			ifindex;      //网络命名空间中分配的最有一个设备索引
@@ -83,6 +111,7 @@ struct net {
 	struct list_head	rules_ops;
 
 
+	/* 环回接口设备*/
 	struct net_device       *loopback_dev;          /* The loopback */
 	struct netns_core	core;
 	struct netns_mib	mib;
@@ -155,7 +184,7 @@ static inline struct net *copy_net_ns(unsigned long flags,
 #endif /* CONFIG_NET_NS */
 
 
-extern struct list_head net_namespace_list;
+extern struct list_head net_namespace_list;//init_net有加到该链表中
 
 struct net *get_net_ns_by_pid(pid_t pid);
 struct net *get_net_ns_by_fd(int pid);

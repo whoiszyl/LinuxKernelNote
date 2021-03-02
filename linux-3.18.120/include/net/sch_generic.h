@@ -16,14 +16,15 @@ struct qdisc_walker;
 struct tcf_walker;
 struct module;
 
-// 流控速率控制表结构
-struct qdisc_rate_table {
+// 流控速率控制表结构 （一）空闲资源流控算法
+struct qdisc_rate_table { //所有的都添加到qdisc_rtab_list
 	struct tc_ratespec rate;
-	u32		data[256];
+	u32		data[256];//参考应用层tc_calc_rtable   //这里得到的就是2047个字节所消耗的空闲资源。
 	struct qdisc_rate_table *next;
 	int		refcnt;
 };
 
+//qdisc->state
 enum qdisc_state_t {
 	__QDISC_STATE_SCHED,
 	__QDISC_STATE_DEACTIVATED,
@@ -44,13 +45,46 @@ struct qdisc_size_table {
 	int			refcnt;
 	u16			data[];
 };
+/*
+ * tc可以使用以下命令对QDisc、类和过滤器进行操作：
+ * add，在一个节点里加入一个QDisc、类或者过滤器。添加时，需要传递一个祖先作为参数，传递参数时既可以使用ID也可以直接传递设备的根。如果要建立一个QDisc或者过滤器，可以使用句柄(handle)来命名；如果要建立一个类，可以使用类识别符(classid)来命名。
+ * remove，删除有某个句柄(handle)指定的QDisc，根QDisc(root)也可以删除。被删除QDisc上的所有子类以及附属于各个类的过滤器都会被自动删除。
+ * change，以替代的方式修改某些条目。除了句柄(handle)和祖先不能修改以外，change命令的语法和add命令相同。换句话说，change命令不能一定节点的位置。
+ * replace，对一个现有节点进行近于原子操作的删除／添加。如果节点不存在，这个命令就会建立节点。
+ * link，只适用于DQisc，替代一个现有的节点。
+ * tc qdisc [ add | change | replace | link ] dev DEV [ parent qdisc-id | root ] [ handle qdisc-id ] qdisc [ qdisc specific parameters ]
+ * tc class [ add | change | replace ] dev DEV parent qdisc-id [ classid class-id ] qdisc [ qdisc specific parameters ]
+ * tc filter [ add | change | replace ] dev DEV [ parent qdisc-id | root ] protocol protocol prio priority filtertype [ filtertype specific parameters ] flowid flow-id
+ * tc [-s | -d ] qdisc show [ dev DEV ]
+ * tc [-s | -d ] class show dev DEV tc filter show dev DEV
 
-struct Qdisc {
+ * tc qdisc show dev eth0
+ * tc class show dev eth0
+ */
+//tc qdisc add dev eth0 parent 22:4 handle 33中的22:4中的4实际上对应的是Qdisc私有数据部分分类信息中的3,parent 22:x中的x是从1开始排，但是对应到分类数组中具体的类的时候，是从0开始排，所以要减1，例如prio参考prio_get
+//前言linux内核中提供了流量控制的相关处理功能，相关代码在net/sched目录下；而应用层上的控制是通过iproute2软件包中的tc来实现，tc和sched的关系就好象iptables和netfilter的关系一样，一个是用户层接口，一个是具体实现，关于tc的使用方法可详将Linux Advanced Routing HOWTO，本文主要分析内核中的具体实现。
+//该结构中文称呼为:流控对象(队列规定)
+//Qdisc开辟空间qdisc_alloc后面跟的是priv_size数据，见pfifo_qdisc_ops prio_qdisc_ops tbf_qdisc_ops sfq_qdisc_ops ingress_qdisc_ops(入口流控对象 ) 等中的priv_size， 图形化参考TC流量控制实现分析（初步） 
+/*
+ * 队列规程分为无类队列规程和有类对了规程，有类的队列规程可以创建多个子队列规程(可以是分类的也可以是无类的队列规程)，如果只创建一个无类队列规程就相当于一个叶子规程
+ * ，SKB直接入队到该队列规程的skb队列中。如果是创建一个分类的队列规程，则第一个创建的队列规程就是跟，下面可以包括多个子队列规程，但所以分类队列规程必须有对应
+ * 的叶子无类队列规程，因为分类队列规程里面是没有skb队列的。
+ * 当一个SKB到分类队列规程的跟的时候，该选择走那条子队列规程入队呢? 这就是过滤器的作用，过滤器可以通过IP MASK等信息来确定走那个子队列规程分支。如果没有设置
+ * 过滤器，则一般根据skb->priority来确定走那个分支。
+ * tc qdisc add dev eth0 root handle 1: htb 创建跟队列规程 (在创建跟分类规程的时候，一般默认是会有自队列规程的，例如pfifo无类规程)
+ * tc class add dev eth0 parent 1: classid 1:2 htb xxxx  在1:队列规程下面的第1:2分支上，用htb创建一个子有类队列规程htb。并且在xxx中指定htb的参数信息
+ * tc class add dev eth0 parent 1: classid 1:1 htb xxxx  在1:队列规程下面的第1:1分支上，用htb创建一个子有类队列规程htb。并且在xxx中指定htb的参数信息
+ * tc filter add dev eth0 protocol ip parent 1: prio 2 u32 match ip dst 4.3.2.1/32 flowid 1:2 如果收到的是ip地址为4.3.2.1的SKB包，则走子队列规程1:2入队，而不是走1:1分子入队
+ */ 
+//最好的源码理解参考<<linux内核中流量控制>>
+struct Qdisc { /* 参考 TC流量控制实现分析（初步）*/ //prio_sched_data中的queues指向该Qdisc              #注意命令中的ID(parent 1:2 xxx flowid 3:3)参数都被理解为16进制的数
+	//qdisc_alloc分配中在struct Qdisc结构后面的私有数据为pfifo_qdisc_ops prio_qdisc_ops tbf_qdisc_ops sfq_qdisc_ops ingress_qdisc_ops中的priv_size部分
+    //enqueue和dequeue的赋值见qdisc_alloc
 	int 			(*enqueue)(struct sk_buff *skb, struct Qdisc *dev);// 入队操作
 	struct sk_buff *	(*dequeue)(struct Qdisc *dev);// 出队操作
-	unsigned int		flags; // 标志
-#define TCQ_F_BUILTIN		1
-#define TCQ_F_INGRESS		2
+	unsigned int		flags; //排队规则标志，取值为下面这几种宏定义  TCQ_F_THROTTLED
+#define TCQ_F_BUILTIN		1//表示排队规则是空的排队规则，在删除释放时不需要做过多的资源释放
+#define TCQ_F_INGRESS		2//表示排队规则为输入排队规则
 #define TCQ_F_CAN_BYPASS	4
 #define TCQ_F_MQROOT		8
 #define TCQ_F_ONETXQUEUE	0x10 /* dequeue_skb() can assume all skbs are for
@@ -60,20 +94,28 @@ struct Qdisc {
 				      * Its true for MQ/MQPRIO slaves, or non
 				      * multiqueue device.
 				      */
-#define TCQ_F_WARN_NONWC	(1 << 16)
+#define TCQ_F_WARN_NONWC	(1 << 16)// 作为已经打印了警告信息的标志
 #define TCQ_F_CPUSTATS		0x20 /* run using percpu statistics */
 	u32			limit;
 	// Qdisc的基本操作结构
-	const struct Qdisc_ops	*ops;
+	/*pfifo_qdisc_ops tbf_qdisc_ops sfq_qdisc_ops这几个都为出口，ingress_qdisc_ops为入口 */
+	const struct Qdisc_ops	*ops;//prio队列规则ops为pfifo_qdisc_ops，其他还有prio_qdisc_ops tbf_qdisc_ops sfq_qdisc_ops ingress_qdisc_ops(入口流控对象 ) 等
 	struct qdisc_size_table	__rcu *stab;
-	struct list_head	list;
-	// 句柄
-	u32			handle;
-	u32			parent;
+	struct list_head	list;//连接到所配置的网络设备上
+
+	/*排队规则实例的标识分为主编号部分和副编号部分，其中主编号部分由用户分配，范围从
+	0X0001到0X7FFFF，如果用户指定主编号为0，那么内核讲在0X8000到0XFFFF之间分配一个主编号
+	标识在单个网络设备是唯一的，但在多个网络设备之间可以由重复*/
+	u32			handle; //本Qdisc的句柄，tc qdisc add dev eth0 root handle 22中的22
+	u32			parent;//父队列规则的句柄值  tc qdisc add dev eth0 parent 22:4 handle 33 中handle为33 parent为22
+    /* 用于实现更复杂的流量控制机制，很少排队规则会实现此接口。当一个外部队列向内部队列
+     * 传递报文时，可能出现报文必须被丢弃的情况，如当没有可用缓冲区时。如果排队规则实现了该回调
+     * 函数，那么这时就可以被内部排队规则调用
+	 */
 	int			(*reshape_fail)(struct sk_buff *skb,
 					struct Qdisc *q);
 
-	void			*u32_node;
+	void			*u32_node;//指向tc_u_common，见u32_init  指向的是指定队列规程的第一个u32过滤器
 
 	/* This field is deprecated, but it is still used by CBQ
 	 * and it will live until better solution will be invented.
@@ -91,11 +133,11 @@ struct Qdisc {
 	 * For performance sake on SMP, we put highly modified fields at the end
 	 */
 	unsigned long		state;
-	struct sk_buff_head	q;
-	struct gnet_stats_basic_packed bstats;
+	struct sk_buff_head	q; //SKB就是添加到该队列中的  pfifo是入队的时候直接加入该skb链表，所以是典型的先进先出
+	struct gnet_stats_basic_packed bstats;//记录入队报文总字节数和入队报文总数
 	unsigned int		__state;
-	struct gnet_stats_queue	qstats;
-	struct rcu_head		rcu_head;
+	struct gnet_stats_queue	qstats;//记录队列相关统计数据
+	struct rcu_head     rcu_head;//通过本字节在没有对象再使用该排队规则时释放该排队规则
 	int			padded;
 	atomic_t		refcnt;
 
@@ -149,29 +191,51 @@ static inline void qdisc_unthrottled(struct Qdisc *qdisc)
 {
 	clear_bit(__QDISC_STATE_THROTTLED, &qdisc->state);
 }
+/*
+ * 分类的队列规定，例如prio cbq htb，这些队列规则Qdisc都会对应一个类接口，如果是无类的队列规定，则没有该类操作接口
+ * prio对应prio_class_ops htb对应htb_class_ops cbq对应cbq_class_ops等等
+
+ * 分类队列规程Qdisc ops中的Qdisc_class_ops主要是在创建子Qdisc的时候，按照parent 22:4中的22:4对父Qdisc进行分类，从而通过22:4作为参数，
+ * 选出该子Qdisc应该加到那个分类Qdisc后面。可以参考prio_qdisc_ops中的prio_get和prio_graft，就很好明白了
+ */ 
+//创建子队列规则或者class的时候，该结构的作用就是通过parent 22:8中的8从prio_get(以prio分类队列规程为例)选出的prize_size私有数据部分数组中的那一个具体信息，
 //流控队列类别操作结构
-struct Qdisc_class_ops {
+struct Qdisc_class_ops { //主要在qdisc_graft执行下面的相关函数       可以参考prio_qdisc_ops，以prio为例        tc_ctl_tclass
 	/* Child qdisc manipulation */
 	struct netdev_queue *	(*select_queue)(struct Qdisc *, struct tcmsg *);
 	// 减子节点
+	//函数qdisc_graft中调用
 	int			(*graft)(struct Qdisc *, unsigned long cl,
-					struct Qdisc *, struct Qdisc **);
+					struct Qdisc *, struct Qdisc **);//用于将一个队列规则Qdisc绑定到一个类，并返回先前绑定到这个类的队列规则
 	// 增加子节点
+	//获取当前绑定到所在类的队列规则
 	struct Qdisc *		(*leaf)(struct Qdisc *, unsigned long cl);
+
+	//用于相应队列长度变化
 	void			(*qlen_notify)(struct Qdisc *, unsigned long);
 
 	/* Class manipulation routines */
-	unsigned long		(*get)(struct Qdisc *, u32 classid);// 获取, 增加使用计数
-	void			(*put)(struct Qdisc *, unsigned long);// 释放, 减少使用计数
+    //根据给点的类描述符从排队规则中查找对应的类，并引用该类，该类的引用计数增。
+    //表示使用队列规程里面的第几个分类信息，一个分类队列规程里面都会有好几个分类信息，通过classid从其中选一个，例如prio分类规程通过prio_get获取分类频道中的第几个频道
+    //根据该函数来确定使用该Qdisc的那个类，判断条件为tc qdisc add dev eth0 parent 22:4 handle 33中的22:4,以prio分类队列规程为例，见prio_get
+	unsigned long		(*get)(struct Qdisc *, u32 classid);// 获取, 增加使用计数，通过qdisc_graft调用
+    //递减指定类的引用计数，如果引用计数为0，则删除释放此类。
+	void			(*put)(struct Qdisc *, unsigned long);// 释放, 减少使用计数，函数qdisc_graft中调用
+    //用于变更指定类的参数，如果该类不存在则新建之。
 	int			(*change)(struct Qdisc *, u32, u32,
 					struct nlattr **, unsigned long *);// 改变
+    //用于删除并释放指定的类。首先会递减该类的引用计数，如果引用计数递减后为0，删除释放之。
 	int			(*delete)(struct Qdisc *, unsigned long);// 删除
+    //遍历一个排队规则的所有类，取回实现了回调函数类的配置数据及统计信息
 	void			(*walk)(struct Qdisc *, struct qdisc_walker * arg);// 遍历
 
 	/* Filter manipulation */
+	//获取绑定到该类的过滤器所在链表的首节点
 	struct tcf_proto __rcu ** (*tcf_chain)(struct Qdisc *, unsigned long);
+    //在一个过滤器正准备绑定到指定的类之前被调用，通过类标识符获取类，首先递增引用计数，然后是一些其他的检查
 	unsigned long		(*bind_tcf)(struct Qdisc *, unsigned long,
-					u32 classid);// tc捆绑
+					u32 classid);// tc捆绑，见tcf_bind_filter
+    //在过滤器完成绑定到指定的类后被调用，递减类引用计数
 	void			(*unbind_tcf)(struct Qdisc *, unsigned long);// tc解除
 
 	/* rtnetlink specific */
@@ -181,15 +245,25 @@ struct Qdisc_class_ops {
 					struct gnet_dump *);
 };
 
-struct Qdisc_ops {
+//所有的Qdisc_ops结构通过register_qdisc添加到qdisc_base链表中
+//Qdisc中的ops指向这里              
+/*pfifo_fast_ops pfifo_qdisc_ops tbf_qdisc_ops sfq_qdisc_ops prio_class_ops这几个都为出口，ingress_qdisc_ops为入口 */
+struct Qdisc_ops { //prio队列规则ops为pfifo_qdisc_ops，其他还有tbf_qdisc_ops sfq_qdisc_ops等， 
 	struct Qdisc_ops	*next;// 链表中的下一个
-	const struct Qdisc_class_ops	*cl_ops;// 类别操作结构
+    //所有规则提供的类操作接口。
+	const struct Qdisc_class_ops	*cl_ops; //无类的队列pfifo bfifo规则没有class子类ops，
 	char			id[IFNAMSIZ];// Qdisc的名称, 从数组大小看应该就是网卡名称
-	int			priv_size;// 私有数据大小
+	//附属在排队规则上的私有信息块大小，该信息块通常与排队规则一起分配内存，紧跟在排队
+	//规则后面，可用qdisc_priv获取， 
+	int			priv_size; //本类对象私有数据大小 Qdisc_alloc开辟Qdisc空间的时候会多开辟priv_size空间
 
+	//enqueue返回值NET_XMIT_SUCCESS等
 	int 			(*enqueue)(struct sk_buff *, struct Qdisc *);// 入队
+	//将先前出队的报文重新排入到队列中的函数。不同于enqueue的是，重新入队的报文需要被放置在她
+	//出队前在排队规则队列中所处的位置上。该接口通常用于报文要发送出去而有dequeue出队后，因某个不可预见的原因最终未能发送的情况。
 	struct sk_buff *	(*dequeue)(struct Qdisc *);// 出队
 	struct sk_buff *	(*peek)(struct Qdisc *);// 将数据包重新排队
+	//从队列移除并丢弃一个报文的函数
 	unsigned int		(*drop)(struct Qdisc *);// 丢弃
 
 	int			(*init)(struct Qdisc *, struct nlattr *arg);// 初始化
@@ -199,63 +273,81 @@ struct Qdisc_ops {
 	void			(*attach)(struct Qdisc *);
 
 	int			(*dump)(struct Qdisc *, struct sk_buff *);// 输出
+    //用于输出排队规则的配置参数和统计数据的函数。
 	int			(*dump_stats)(struct Qdisc *, struct gnet_dump *);
 
 	struct module		*owner;
 };
 
-
+//通过解析SKB中的内容来匹配过滤器tc filter，匹配结果存到该结构中。也就是直接获取该过滤器所在class的(tc add class的时候创建的class树节点)htb_class
 struct tcf_result {
-	unsigned long	class;
-	u32		classid;
+	unsigned long	class; //这个实际上是一个指针地址，指向的是tc filter add xxxx flowid 22:4对应的htb_class结构，见tcf_bind_filter
+	u32		classid;//见u32_set_parms，该值为//tc filter add dev eth0 protocol ip parent 22: prio 2 u32 match ip dst 4.3.2.1/32 flowid 22:4中的flowid，表示该过滤器属于那个队列规程树节点
 };
 
+//tcf_proto中的ops，所有的tcf_proto_ops通过tcf_proto_base连接在一起，见register_tcf_proto_ops
+//主要有cls_u32_ops cls_basic_ops  cls_cgroup_ops  cls_flow_ops cls_route4_ops RSVP_OPS
 struct tcf_proto_ops {
-	struct list_head	head;
-	char			kind[IFNAMSIZ];
+	struct list_head	head;//用来将已注册过滤器连接到tcf_proto_base链表上的指针
+	char			kind[IFNAMSIZ];//过滤器类名 
 
 	int			(*classify)(struct sk_buff *,
 					    const struct tcf_proto *,
-					    struct tcf_result *);
-	int			(*init)(struct tcf_proto*);
+					    struct tcf_result *);//分类函数，结果保存在tcf_result中，返回值有TC_POLICE_OK等
+	int			(*init)(struct tcf_proto*);//tc_ctl_tclass中调用
+    //释放并删除过滤器函数
 	void			(*destroy)(struct tcf_proto*);
 
-	unsigned long		(*get)(struct tcf_proto*, u32 handle);
+    //讲一个过滤器元素的句柄映射到一个内部过滤器标识符，实际上是过滤器实例指针，并将其返回
+	unsigned long		(*get)(struct tcf_proto*, u32 handle); //获取对应的过滤器
+    //释放对get得到的过滤器的引用
 	void			(*put)(struct tcf_proto*, unsigned long);
+	//用于配置一个新过滤器或是变更一个已存在的过滤器配置。
 	int			(*change)(struct net *net, struct sk_buff *,
 					struct tcf_proto*, unsigned long,
 					u32 handle, struct nlattr **,
 					unsigned long *, bool);
 	int			(*delete)(struct tcf_proto*, unsigned long);
+    //遍历所有的元素并且调用回调函数取得配置数据和统计数据
 	void			(*walk)(struct tcf_proto*, struct tcf_walker *arg);
 
-	/* rtnetlink specific */
+	/* rtnetlink specific */  
+	//用于输出所有的元素并且调用回调函数取得配置数据和统计数据
 	int			(*dump)(struct net*, struct tcf_proto*, unsigned long,
 					struct sk_buff *skb, struct tcmsg*);
 
 	struct module		*owner;
 };
-
-struct tcf_proto {
-	/* Fast access part */
+/* 优先级队列规定的band为16个,参考TC流量控制实现分析(初步)-图3  建立”prio”类型的根流控对象_2 */   //详细理解也可以参考<<LINUX高级路由和流量控制>>
+//tc filter add dev eth0 protocol ip parent 22: prio 2 u32 match ip dst 4.3.2.1/32 flowid 22:4
+/*现在数据包的入队流程如下：
+1.      根对象的过滤器链非空，遍历根对象的过滤器链，遇到第一个匹配的过滤器就返回，并根据返回的结果选择子类。
+2.      每个过滤器都调用相应的分类函数，并根据过滤器的私有数据来匹配数据包。
+*/
+//tc filter u32过滤器的结构    过滤器创建在tc_ctl_tfilter中，并在该函数中初始化
+struct tcf_proto { //该结构是加入到prio_sched_data中的filter_list链表中  每调用一次tc filter add就会创建一个tcf_proto结构，调用多个tc filter add的时候就创建多个tcf_proto结构，通过next连接
+	/* Fast access part */ 
+	//tcf一般表示tcf_proto过滤器的简写
 	struct tcf_proto __rcu	*next;
-	void __rcu		*root;
+	void __rcu		*root;//如果为u32类型，指向过滤器跟tc_u_hnode， 见u32_init，该过滤器下面的所有tc_u_common节点都添加到该tc_u_hnode跟上
 	int			(*classify)(struct sk_buff *,
 					    const struct tcf_proto *,
-					    struct tcf_result *);
-	__be16			protocol;
+					struct tcf_result *); //分类函数，结果保存在tcf_result中。通过SKB中的内容，来匹配这个过滤器，结果返回给tcf_result，见tc_classify_compat
+	__be16			protocol; //协议号，//tc filter add dev eth0 protocol ip中protocol ip对应的是数字ETH_P_IP
 
 	/* All the rest */
-	u32			prio;
-	u32			classid;
-	struct Qdisc		*q;
-	void			*data;
+	u32			prio; //根据这个优先级加入到prio_sched_data中的filter_list链表中。tc filter add dev eth0 protocol ip parent 22: prio 2为2
+	u32			classid; //指定父Qdisc中的子类位置=22:4
+	struct Qdisc		*q; //父Qdisc,就是该过滤器所处的队列规则节点的上级父Qdisc
+	void			*data; //如果最后创建的u32类型过滤器节点tc_u_common，见u32_init
+	//cls_u32_ops 
+	//主要有cls_u32_ops cls_basic_ops  cls_cgroup_ops  cls_flow_ops cls_route4_ops RSVP_OPS
 	const struct tcf_proto_ops	*ops;
 	struct rcu_head		rcu;
 };
 
 struct qdisc_skb_cb {
-	unsigned int		pkt_len;
+	unsigned int		pkt_len;//见qdisc_enqueue_root，当入队的时候，该值为SKB->len
 	u16			slave_dev_queue_mapping;
 	u16			_pad;
 #define QDISC_CB_PRIV_LEN 20
@@ -347,17 +439,18 @@ extern struct Qdisc_ops noop_qdisc_ops;
 extern struct Qdisc_ops pfifo_fast_ops;
 extern struct Qdisc_ops mq_qdisc_ops;
 extern const struct Qdisc_ops *default_qdisc_ops;
-
-struct Qdisc_class_common {
-	u32			classid;
-	struct hlist_node	hnode;
+//该结构为htb_class -> common
+struct Qdisc_class_common {//存放在Qdisc_class_hash中, 变量class在qdisc_class_find
+	u32			classid;// 类别ID值, 高16位用于区分不同的HTB流控, 低16位为区分同一HTB流控中的不同类别
+	struct hlist_node	hnode; //通过这个hnode最终把htb_class加入到htb_sched->clhash中，见htb_change_class -> qdisc_class_hash_insert
 };
 
-struct Qdisc_class_hash {
-	struct hlist_head	*hash;
-	unsigned int		hashsize;
-	unsigned int		hashmask;
-	unsigned int		hashelems;
+//该结构为htb私有数据htb_sched中的clhash，用来存储所有tc class add创建的htb_class
+struct Qdisc_class_hash { //hash过程见qdisc_class_hash_grow
+	struct hlist_head	*hash;//该链表中存放的是Qdisc_class_common,该hash表空间在qdisc_class_hash_init创建     qdisc_class_find
+	unsigned int		hashsize; //默认初始值见qdisc_class_hash_init。如果hash节点数hashelems超过设置的hashsize的0.75，则从新hash，hashsize扩大到之前hashsize两倍，见qdisc_class_hash_grow
+	unsigned int		hashmask;  //qdisc_class_hash_init
+	unsigned int		hashelems; //实际的hash class节点数 //hashelems和hashsize关系见qdisc_class_hash_grow
 };
 
 static inline unsigned int qdisc_class_hash(u32 id, u32 mask)
@@ -367,6 +460,7 @@ static inline unsigned int qdisc_class_hash(u32 id, u32 mask)
 	return id & mask;
 }
 
+//查找
 static inline struct Qdisc_class_common *
 qdisc_class_find(const struct Qdisc_class_hash *hash, u32 id)
 {
@@ -374,7 +468,7 @@ qdisc_class_find(const struct Qdisc_class_hash *hash, u32 id)
 	unsigned int h;
 
 	h = qdisc_class_hash(id, hash->hashmask);
-	hlist_for_each_entry(cl, &hash->hash[h], hnode) {
+	hlist_for_each_entry(cl, &hash->hash[h], hnode) {// 根据句柄计算哈希值, 然后遍历该哈希链表
 		if (cl->classid == id)
 			return cl;
 	}
@@ -508,7 +602,8 @@ static inline int qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	return sch->enqueue(skb, sch);
 }
 
-static inline int qdisc_enqueue_root(struct sk_buff *skb, struct Qdisc *sch)
+//ingress通过ing_filter入队
+static inline int qdisc_enqueue_root(struct sk_buff *skb, struct Qdisc *sch) //sch dev设备的qdisc
 {
 	qdisc_skb_cb(skb)->pkt_len = skb->len;
 	return qdisc_enqueue(skb, sch) & NET_XMIT_MASK;
@@ -604,6 +699,7 @@ static inline struct sk_buff *__qdisc_dequeue_head(struct Qdisc *sch,
 	return skb;
 }
 
+//__qdisc_run -> qdisc_restart -> dequeue_skb -> prio_dequeue(这里面有个递归调用过程) -> qdisc_dequeue_head
 static inline struct sk_buff *qdisc_dequeue_head(struct Qdisc *sch)
 {
 	return __qdisc_dequeue_head(sch, &sch->q);
@@ -729,6 +825,7 @@ static inline unsigned int __qdisc_queue_drop(struct Qdisc *sch,
 	return 0;
 }
 
+//丢弃qdisc排队规程skb队列上的数据
 static inline unsigned int qdisc_queue_drop(struct Qdisc *sch)
 {
 	return __qdisc_queue_drop(sch, &sch->q);
@@ -758,18 +855,68 @@ drop:
 	return NET_XMIT_DROP;
 }
 
+/*
+qdisc_rate_table{
+  struct tc_ratespec rate;
+  u32 data[256];
+  struct qdisc_rate_table *next;
+  int refcnt;
+}
+
+这个结构主要是用来在内核计算令牌时用的。
+我能理解，不过我有点说不明白。
+内核的最小调度单位是一个tick。所以内核要把世界时间转化为内核的tick时间。
+你在好好体会一下，就相当于是一个汇率，世界时间的100ms，转换到内核tick时间是要成一个系数的。
+
+（一）空闲资源流控算法
+算法概述：单位时间内产生的空闲资源一定，每发送一个字节都要消耗相应大小的空闲资源，当空闲资源不足时停止发送数据包，设定的流速越大，
+发送一个字节所消耗的空闲资源就越小，通过设置发送一个字节所消耗的空闲资源来进行流速控制。
+
+基本概念:
+1. 空闲资源：发送一个数据包都必须消耗空闲资源，如果某个对象的空闲资源为0，将无法发送数据包，只要空闲资源足够多就可以发送数据包。
+(TC用户空间规则定每秒产生的空闲资源是TIME_UNITS_PER_SEC       1000000，而TC内核根据空闲时间来计算空闲资源。)
+2.空闲时间：假设对象最近一次发送数据包的时刻是T1，系统当前的时刻是T2，则空闲时间tk = T1 – T2。
+3. 流速rate：每秒允许发送的的字节个数。
+4. 空闲资源积累量：以空闲时间为参数根据一定的算法得到的值（比如可以将空闲时间乘上一个正数），但是要保证空闲时间越大，对应的空闲资源的积累量必定要越大。
+5. 空闲资源剩余量：最近一次发送数据包以后，空闲资源的剩余量。
+6. 当前可用空闲资源：以空闲资源的剩余量和空闲资源的积累量为参数根据一定的算法得到的值（比如可以 = 1/6空闲资源的剩余量 + (1 – 1/6)空闲资源的积累），
+   但是要保证当前可用空闲资源都是空闲资源剩余量和空闲资源积累量的递增函数。
+   为了更好的理解空闲资源流控算法，需要引入流速概念的第二种描述，也就是，使用空闲资源来描述流速的概念。
+7.流速kc(用空闲资源描述)：假设每秒产生的空闲资源是TIME_UNITS_PER_SEC，流速rate(每秒允许发送的数据量是rate个字节)，则发送一个字节的流量需要消耗的
+  空闲资源是kc = TIME_UNITS_PER_SEC/rate
+  这里的kc就是新引入的流速描述方法。流速rate越大，kc就越小。
+
+  如果要发送size字节的数据包需要消耗size*(TIME_UNITS_PER_SEC/rate)的空闲资源。
+  只要空闲资源足够多，就可以发送数据包，每发送一个数据包，空闲资源减去相应的消耗量。
+  只要空闲时间一直累积，空闲资源将会变得很大，这时就失去了调控流速的意义，所以引入最大空闲资源，以使空闲资源不会太大。
+调控流速的过程：
+假设只要空闲资源非零，就试图发送一个长度是L的数据包，流速是kc。
+1.      初始时刻空闲资源和空闲时间都为0，显然不允许发送数据包。
+2.      休眠一段时间，空闲时间大于0，计算空闲资源累积量，并计算当前可用空闲资源tu。
+3.      计算L长度的数据包需要消耗kc*L的空闲资源，如果tu > a*L，发送数据包，否则再休眠一段时间。
+4.      发送数据包后减少空闲资源：tu = tu – a*L，如果tu > 0，重复3的过程，直到再次休眠。
+5.      最理想的状态是：总是成立ts = a*L。
+
+基本上时可以达到调控的目的，但是结果是不准确的，相同的算法，相同的参数，在不同的网络环境（主要是硬件的配置不同）中流控的结果肯定不同。
+但是可以根据具体的网络环境，来选择适当的参数来提高算法的准确度。
+可以调整的参数有两类：1. 算法参数，2. 配置参数。
+可调整算法参数有：1. 空闲时间和空闲资源的换算参数 2. 每秒可产生的空闲资源TIME_UNITS_PER_SEC。
+
+*/
 /* Length to Time (L2T) lookup in a qdisc_rate_table, to determine how
    long it will take to send a packet given its size.
- */
-static inline u32 qdisc_l2t(struct qdisc_rate_table* rtab, unsigned int pktlen)
+ 
+ */ 
+// 将长度转换为令牌数 参考<（一）空闲资源流控算法>  参考应用层tc_calc_rtable   
+static inline u32 qdisc_l2t(struct qdisc_rate_table* rtab, unsigned int pktlen) //表示发送ptklen长度需要消耗多少空闲资源时间
 {
 	int slot = pktlen + rtab->rate.cell_align + rtab->rate.overhead;
 	if (slot < 0)
 		slot = 0;
 	slot >>= rtab->rate.cell_log;
-	if (slot > 255)
+	if (slot > 255)// 如果超过了255, 限制为255
 		return rtab->data[255]*(slot >> 8) + rtab->data[slot & 0xFF];
-	return rtab->data[slot];
+	return rtab->data[slot];//默认情况下//这里得到的就是2047个字节所消耗的空闲资源。
 }
 
 #ifdef CONFIG_NET_CLS_ACT

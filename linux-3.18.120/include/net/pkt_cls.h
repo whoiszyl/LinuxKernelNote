@@ -36,13 +36,15 @@ cls_set_class(struct tcf_proto *tp, unsigned long *clp,
 	return old_cl;
 }
 
+//base为flowid 22:4对应的htb_class结构，见htb_get
 static inline void
 tcf_bind_filter(struct tcf_proto *tp, struct tcf_result *r, unsigned long base)
 {
 	unsigned long cl;
 
-	cl = tp->q->ops->cl_ops->bind_tcf(tp->q, base, r->classid);
-	cl = cls_set_class(tp, &r->class, cl);
+	cl = tp->q->ops->cl_ops->bind_tcf(tp->q, base, r->classid);//htb的class ops对应的是htb_class_ops
+	//cl为从过滤器tp所在的qdisc队列规则的下级class中找到的子class, struct htb_class *cl
+	cl = cls_set_class(tp, &r->class, cl);//
 	if (cl)
 		tp->q->ops->cl_ops->unbind_tcf(tp->q, cl);
 }

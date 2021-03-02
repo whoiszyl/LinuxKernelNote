@@ -32,7 +32,7 @@
 struct inet_hashinfo;
 
 #define INET_TWDR_RECYCLE_SLOTS_LOG	5
-#define INET_TWDR_RECYCLE_SLOTS		(1 << INET_TWDR_RECYCLE_SLOTS_LOG)
+#define INET_TWDR_RECYCLE_SLOTS		(1 << INET_TWDR_RECYCLE_SLOTS_LOG) //32
 
 /*
  * If time > 4sec, it is "slow" path, no recycling is required,
@@ -68,23 +68,116 @@ static inline u32 inet_tw_time_stamp(void)
 
 #define INET_TWDR_TWKILL_QUOTA 100
 
-struct inet_timewait_death_row {
+/*
+在TCP连接的终止过程中，为了便于管理相关的数据，所有的timewait控制块和参数等都存放在inet_timewait_death_row结构中集中管理，TCP的实例为tcp_death_row，其中包括用于
+存储timewait控制块的散列表和相应的定时器等。图形化理解可以参考樊东东下册P1002
+*/ 
+//对tcp_timewait_sock进行处理                      TCP中该变量赋值的地方在tcp_death_row
+struct inet_timewait_death_row { //tcp_timewait_sock的调度过程在inet_twsk_schedule
 	/* Short-time timewait calendar */
-	int			twcal_hand;
-	unsigned long		twcal_jiffie;
-	struct timer_list	twcal_timer;
-	struct hlist_head	twcal_row[INET_TWDR_RECYCLE_SLOTS];
+    /* 下面的这几个2MSL是: 2MSL等待超时时间较短成员变量 */
 
+    
+	/* Short-time timewait calendar */
+	/*
+	 * 初始值为-1，表示twcal_timer定时器
+	 * 未使用过，或者使用后已删除。
+	 * 当其值不为-1时，表示当前正使用
+	 * 的slot，作为每次遍历twcal_row散列表
+	 * 的入口。因此在设置超时时间，启动
+	 * 定时器后，将其设置为0，表示已开始
+	 * 使用
+	 */
+	int			twcal_hand;
+	/*
+	 * twcal_timer定时器超时时间，是清除
+	 * timewait控制块的阀门
+	 */
+	unsigned long		twcal_jiffie;
+	/*
+	 * twcal_timer的超时处理函数是inet_twdr_twcal_tick(),
+	 * 它扫描整个twcal_row，删除所有的超时twsk，
+	 * 对剩下的twsk重新设定超时时间
+	 */
+	struct timer_list	twcal_timer;
+	/*
+	 * TIME_WAIT超时时间除以INET_TWDR_RECYCLE_TICK后
+	 * 向上取整，用来判断将该timewait控制块添加
+	 * 到cells还是twcal_row散列表中。
+	 * 如果得到值大于或等于INET_TWDR_RECYCLE_SLOTS，
+	 * 则将其添加到cells散列表中，否则添加到
+	 * twcal_row散列表中
+	 */
+	/*
+	 * 用于存储2MSL等待超时时间较短的timewait
+	 * 控制块的散列表
+	 */
+	struct hlist_head	twcal_row[INET_TWDR_RECYCLE_SLOTS];//里面连接的是tcp_timewait_sock
+
+	/*
+	 * 用于同步访问twcal_row和cells散列表的自旋锁
+	 */
 	spinlock_t		death_lock;
-	int			tw_count;
+	/*
+	 * 当前系统中处于TIME_WAIT状态的套接字数。该值不会
+	 * 超过系统参数tcp_max_tw_buckets，参见
+	 * NET_TCP_MAX_TW_BUCKETS系统参数
+	 */
+	 //在tcp_time_wait中创建inet_timewait_sock后，在inet_twsk_schedule自增加1
+	int			tw_count; //在函数inet_twsk_schedule中自增  是当前TIME_WAIT状态套接字的数量
+
+	/* 下面的这几个2MSL是: 2MSL等待超时时间较短成员变量 */
+	/*
+	 * tw_timer定时器的超时时间为
+	 * TCP_TIMEWAIT_LEN / INET_TWDR_TWKILL_SLOTS，
+	 * 即将60s分成8份
+	 */
 	int			period;
+	/*
+	 * 在分批删除并释放cells散列表中的timewait控制块
+	 * 时，用于标识待删除slot的位图
+	 */
 	u32			thread_slots;
+	/*
+	 * 进行分批删除并释放cells散列表中的timewait
+	 * 控制块的工作队列
+	 */
 	struct work_struct	twkill_work;
+	/*
+	 * tw_timer的超时处理函数是inet_twdr_hangman()，每
+	 * 经过一个period超时一次，取cells中对应的队列，
+	 * 删除队列中所有的twsk，同时从ehash散列表
+	 * 的后半部分和bash散列表中删除相应的twsk
+	 * 及其绑定的本地端口。这批twsk的使命即
+	 * 告结束
+	 */ //该定时器在这里inet_twsk_schedule触发，真正的定时器处理函数为inet_twdr_hangman,见tcp_death_row
 	struct timer_list	tw_timer;
-	int			slot;
+	/*
+	 * tw_timer定时器超时时正使用的slot，作为cells
+	 * 散列表的关键字 
+	 //第一个tw_timer超时的时候，twdr->slot=0,低二个tw_timer超时的时候，该值变1，当到7后又回到1。也就是每隔8个period(TCP_TIMEWAIT_LEN / INET_TWDR_TWKILL_SLOTS)
+	 循环一次，这样就可以保证cells表中的所有timewait遍历到(基本上都是INET_TWDR_TWKILL_SLOTS时间遍历到一次本cells，所以时间都是INET_TWDR_TWKILL_SLOTS，除非特殊情况
+	 某个cells上的timewait个数超过INET_TWDR_TWKILL_QUOTA见inet_twdr_do_twkill_work)  见inet_twdr_hangman
+	 */
+	int			slot;//每隔period超时一次
+	/*
+	 * 用于存储2MSL等待超时时间较长的timewait
+	 * 控制块的散列表
+	 */
 	struct hlist_head	cells[INET_TWDR_TWKILL_SLOTS];
+	/*
+	 * 指向inet_hashinfo结构类型实例tcp_hashinfo
+	 */
 	struct inet_hashinfo 	*hashinfo;
-	int			sysctl_tw_recycle;
+	/*  tcp_timestamps参数用来设置是否启用时间戳选项，tcp_tw_recycle参数用来启用快速回收TIME_WAIT套接字。tcp_timestamps参数会影响到
+	tcp_tw_recycle参数的效果。如果没有时间戳选项的话，tcp_tw_recycle参数无效，见tcp_time_wait
+	 * 用来存储系统参数tcp_tw_recycle的值, tcp_tw_recycle参数用来启用快速回收TIME_WAIT套接字
+	 */ //如果启用了tcp_tw_resycle,则tcp_time_wait中超时时间用的tw->tw_timeout = rto，否则是默认的TCP_TIMEWAIT_LEN，TCP_TIMEWAIT_LEN在网络正常的情况下会比rto大，所以启用该参数可以快速回收timewait
+    //开启这个的时候，在tcp_v4_conn_request中的后面可能会存在 针对TCP时间戳PAWS漏洞，造成服务器端收到SYN的时候不回收SYN+ACK，解决办法是对方不要发送时间戳选项，同时关闭tcp_timestamps见tcp_v4_conn_request
+	int			sysctl_tw_recycle;////在应用层的/proc/sys/net中设置的时候，对应的值会写入到data中
+	/*
+	 * 用来存储系统参数tcp_max_tw_buckets的值，表示最多可以由多少个time_wait存在
+	 */
 	int			sysctl_max_tw_buckets;
 };
 
@@ -99,7 +192,14 @@ struct inet_bind_bucket;
  * problems of sockets in such a state on heavily loaded servers, but
  * without violating the protocol specification.
  */
-struct inet_timewait_sock {
+ //tcp_timewait_sock包含inet_timewait_sock，inet_timewait_sock包含sock_common  TCP连接的时候用 TCP_TIME_WAIT状态过程中用到
+ /*
+ * inet_timewait_sock结构是支持面向连接特性的
+ * TCP_TIME_WAIT状态的描述，是构成tcp_timewait_sock的基础
+  tcp_timewait_sock包含inet_timewait_sock，inet_timewait_sock包含sock_common
+ */
+ //当进入TCP连接断开进入timewait状态的时候，该inet_timewait_sock在inet_twsk_schedule中被添加到了tcp_death_row中的tw_death_node中
+struct inet_timewait_sock {//该结构在__inet_twsk_kill中最后释放空间
 	/*
 	 * Now struct sock also uses sock_common, so please just
 	 * don't add nothing before this first member (__tw_common) --acme
@@ -111,8 +211,8 @@ struct inet_timewait_sock {
 #define tw_reuseport		__tw_common.skc_reuseport
 #define tw_ipv6only		__tw_common.skc_ipv6only
 #define tw_bound_dev_if		__tw_common.skc_bound_dev_if
-#define tw_node			__tw_common.skc_nulls_node
-#define tw_bind_node		__tw_common.skc_bind_node
+#define tw_node			__tw_common.skc_nulls_node //inet_twsk_add_node_rcu,加入到
+#define tw_bind_node		__tw_common.skc_bind_node////在超时状态把inet_bind_bucket桶指向tw->tw_bind_node，避免该函数外面在释放sk的时候，会释放掉bind桶信息
 #define tw_refcnt		__tw_common.skc_refcnt
 #define tw_hash			__tw_common.skc_hash
 #define tw_prot			__tw_common.skc_prot
@@ -124,12 +224,24 @@ struct inet_timewait_sock {
 #define tw_dport		__tw_common.skc_dport
 #define tw_num			__tw_common.skc_num
 
+	/*
+	 * 用于记录2MSL超时时间
+	 */
 	int			tw_timeout;
+	/*
+	 * 由于TCP状态迁移到FIN_WAIT2或TIME_WAIT状态时，
+	 * 都需要由定时器来处理，一旦超时套接字
+	 * 随即就被释放。一旦用timewait控制块取代
+	 * tcp_sock传输控制块后，其对外的状态时TIME_WAIT，
+	 * 而内部状态还是有区别的，因此需要tw_substate
+	 * 来标识FIN_WAIT2或TIME_WAIT
+	 */
 	volatile unsigned char	tw_substate;
 	unsigned char		tw_rcv_wscale;
 
 	/* Socket demultiplex comparisons on incoming packets. */
 	/* these three are in inet_sock */
+	//下面这些值都是从inet_sock中获取
 	__be16			tw_sport;
 	kmemcheck_bitfield_begin(flags);
 	/* And these are ours. */
@@ -139,8 +251,19 @@ struct inet_timewait_sock {
 				tw_pad		: 2,	/* 2 bits hole */
 				tw_tos		: 8;
 	kmemcheck_bitfield_end(flags);
+	/*
+	 * 本timewait控制块超时删除的时间(单位为HZ)，
+	 * 供proc文件系统等使用
+	 */
 	u32			tw_ttd;
+	/*
+	 * 指向绑定的本地端口信息，由对应的TCP传输控制块
+	 * 的icsk_bind_hash成员得到。见__inet_twsk_hashdance
+	 */
 	struct inet_bind_bucket	*tw_tb;
+	/*
+	 * 用来在twcal_row和cells散列表中构成链表, 见inet_timewait_death_row
+	 */
 	struct hlist_node	tw_death_node;
 };
 #define tw_tclass tw_tos
