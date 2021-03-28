@@ -49,11 +49,11 @@ struct pt_regs;
 struct irq_desc {
 	struct irq_data		irq_data;
 	unsigned int __percpu	*kstat_irqs;
-	irq_flow_handler_t	handle_irq;
+	irq_flow_handler_t	handle_irq;  /* 当前中断的处理函数入口 */
 #ifdef CONFIG_IRQ_PREFLOW_FASTEOI
 	irq_preflow_handler_t	preflow_handler;
 #endif
-	struct irqaction	*action;	/* IRQ action list */
+	struct irqaction	*action;	/* IRQ action list *//* 用户注册的中断处理函数链表 */
 	unsigned int		status_use_accessors;
 	unsigned int		core_internal_state__do_not_mess_with_it;
 	unsigned int		depth;		/* nested irq disables */
@@ -85,7 +85,7 @@ struct irq_desc {
 #endif
 	int			parent_irq;
 	struct module		*owner;
-	const char		*name;
+	const char		*name;/* 中断函数名 */
 } ____cacheline_internodealigned_in_smp;
 
 #ifndef CONFIG_SPARSE_IRQ

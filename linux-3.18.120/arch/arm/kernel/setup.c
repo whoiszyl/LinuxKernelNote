@@ -580,6 +580,7 @@ static void __init smp_build_mpidr_hash(void)
 
 static void __init setup_processor(void)
 {
+	//proc_info_list 是包含处理器信息的结构体
 	struct proc_info_list *list;
 
 	/*
@@ -587,6 +588,7 @@ static void __init setup_processor(void)
 	 * types.  The linker builds this table for us from the
 	 * entries in arch/arm/mm/proc-*.S
 	 */
+	 //在proc.info段中寻找匹配的processor_id，processor_id在head_armv.S文件中设置
 	list = lookup_processor_type(read_cpuid_id());
 	if (!list) {
 		pr_err("CPU configuration botched (ID %08x), unable to continue.\n",
@@ -925,10 +927,12 @@ void __init setup_arch(char **cmdline_p)
 
 	if (mdesc->restart)
 		arm_pm_restart = mdesc->restart;
-
+	//解析dtb文件，ARM平台的设备信息，都是通过Device Tree设备树来添加，设备树信息放置在arch/arm64/boot/dts/下
+	//将dtb文件解析成device_node结构
 	unflatten_device_tree();
 
 	arm_dt_init_cpu_maps();
+	//读取并解析Device Tree中的内容，从而选择版本
 	psci_init();
 #ifdef CONFIG_SMP
 	if (is_smp()) {

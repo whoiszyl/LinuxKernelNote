@@ -343,27 +343,36 @@ static inline void calc_global_nohz(void) { }
  * calc_load - update the avenrun load estimates 10 ticks after the
  * CPUs have updated calc_load_tasks.
  */
+ /* 全局负载平均值在每次计划刻度中调用，但每calc_load_update周期（：默认 5 秒）更新一次。
+  * 严格地说，当计算周期到来时，它将在 10 个周期后更新。此函数的调用路径计算全局负载平均值
+  */
 void calc_global_load(unsigned long ticks)
 {
 	long active, delta;
 
+	//当前时间 （jiffies） 早于 cpu 负载计算周期（5 秒）+10 个刻度，则退出函数
 	if (time_before(jiffies, calc_load_update + 10))
 		return;
 
 	/*
 	 * Fold the 'old' idle-delta to include all NO_HZ cpus.
 	 */
+	 //获取当前 cpu 的 active 任务数的变化 delta，并加载到calc_load_tasks
 	delta = calc_load_fold_idle();
 	if (delta)
 		atomic_long_add(delta, &calc_load_tasks);
 
+	//如果有活动任务，求出当前的负载值
 	active = atomic_long_read(&calc_load_tasks);
 	active = active > 0 ? active * FIXED_1 : 0;
 
+	//使用指数平滑系数 EXP_n 反映为 avenrun[]，该数值对应于现有 cpu 负载值 avenrun[]
+	//和新添加的 cpu 负载值，分别为 1 分钟、5 分钟和 15 分钟
 	avenrun[0] = calc_load(avenrun[0], EXP_1, active);
 	avenrun[1] = calc_load(avenrun[1], EXP_5, active);
 	avenrun[2] = calc_load(avenrun[2], EXP_15, active);
 
+	//为下一个 cpu 负载计算周期添加 5 秒
 	calc_load_update += LOAD_FREQ;
 
 	/*

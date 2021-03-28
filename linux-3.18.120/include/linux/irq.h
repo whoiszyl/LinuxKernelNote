@@ -150,7 +150,7 @@ struct irq_data {
 	unsigned long		hwirq;
 	unsigned int		node;
 	unsigned int		state_use_accessors;
-	struct irq_chip		*chip;
+	struct irq_chip		*chip; /* 底层硬件访问 */
 	struct irq_domain	*domain;
 	void			*handler_data;
 	void			*chip_data;
@@ -318,16 +318,26 @@ static inline irq_hw_number_t irqd_to_hwirq(struct irq_data *d)
  *				irq_request_resources
  * @flags:		chip specific flags
  */
+//中断的处理函数入口。发生中断时，会调用asm_do_IRQ函数。在这个函数里面根据中断号调用相应irq_desc数组项的handle_irq。
+//在handle_irq里面会使用chip成员的接口来使能、屏蔽、清除中断。还会一一调用用户注册在action链表里面的处理函数。
 struct irq_chip {
 	const char	*name;
+	/* 启动中断，如果不设置则缺省为 "enable" */
 	unsigned int	(*irq_startup)(struct irq_data *data);
+	/* 关闭中断，如果不设置则缺省为 "disable" */
 	void		(*irq_shutdown)(struct irq_data *data);
+	/* 使能中断，如果不设置则缺省为"unmask" */
 	void		(*irq_enable)(struct irq_data *data);
+	/* 禁止中断，如果不设置则缺省为"mask" */ 
 	void		(*irq_disable)(struct irq_data *data);
 
+	/* 响应中断，一般是清除当前的中断，使得可以接收下一个中断 */
 	void		(*irq_ack)(struct irq_data *data);
+	/* 屏蔽中断源 */
 	void		(*irq_mask)(struct irq_data *data);
+	/* 屏蔽和响应中断 */
 	void		(*irq_mask_ack)(struct irq_data *data);
+	/* 开启中断 */
 	void		(*irq_unmask)(struct irq_data *data);
 	void		(*irq_eoi)(struct irq_data *data);
 

@@ -537,6 +537,7 @@ asmlinkage __visible void __init start_kernel(void)
 	boot_cpu_init();//激活当前CPU（在内核全局变量中将当前CPU的状态设为激活状态） 
 	page_address_init();//初始化高端内存 
 	pr_notice("%s", linux_banner); //打印出Linux内核版本等信息  
+	//查找给定机器ID的数据结构信息、配置内存条信息、解析bootloader传递命令行参数，然后根据machine_desc结构体所记录的信息对机器进行一些必要的设置，最后开始正式建立完整的页表
 	setup_arch(&command_line);//CPU架构相关的初始化，处理uboot传递的tag参数和命令行参数，初始化内存页表  
 	mm_init_cpumask(&init_mm);//内容涉及到内存管理子系统
 	setup_command_line(command_line);//保存命令行参数  
@@ -601,8 +602,10 @@ asmlinkage __visible void __init start_kernel(void)
 	context_tracking_init();
 	radix_tree_init();//内核radix树算法初始化 Linux基数树(radix tree)
 	/* init some links before init_ISA_irqs() */
+	//early_irq_init有两种定义，本质上差异不大，根据Linux编译选项CONFIG_SPARSE_IRQ定义与否来决定走哪条路
+	//该编译选项的主要作用是区分中断描述符具体是使用基树还是使用线性管理
 	early_irq_init();//前期外部中断描述符初始化，主要初始化数据结构
-	init_IRQ();//对应构架特定的中断初始化函数  machine_desc->init_irq();  
+	init_IRQ();//对应构架特定的中断初始化函数  machine_desc->init_irq();初始化中断控制器
    	 		   //也就是运行设备描述结构体中的init_irq函数，此函数一般在板级初始化文件（arch/*/mach-*/board-*.c）中定义  
 	tick_init();//作用是初始化时钟事件管理器的回调函数  
 	rcu_init_nohz();

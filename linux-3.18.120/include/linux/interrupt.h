@@ -102,17 +102,24 @@ typedef irqreturn_t (*irq_handler_t)(int, void *);
  * @thread_mask:	bitmask for keeping track of @thread activity
  * @dir:	pointer to the proc/irq/NN/name entry
  */
+ //用户注册的每个中断处理函数都用一个 irqaction 结构体来描述一个中断(例如共享中断)可以有多个处理函数
 struct irqaction {
+	/* 用户注册的中断处理函数 */
 	irq_handler_t		handler;
+	/* handler 中断函数的参数，也可以用来区分共享中断 */
 	void			*dev_id;
 	void __percpu		*percpu_dev_id;
+	/* 链表的指针 */
 	struct irqaction	*next;
 	irq_handler_t		thread_fn;
 	struct task_struct	*thread;
+	/* 中断号 */
 	unsigned int		irq;
+	/* 中断的标志，是否是共享中断，中断的触发方式是电平触发，还是边沿触发 */
 	unsigned int		flags;
 	unsigned long		thread_flags;
 	unsigned long		thread_mask;
+	/* 用户注册时，给的中断的名字 */
 	const char		*name;
 	struct proc_dir_entry	*dir;
 } ____cacheline_internodealigned_in_smp;

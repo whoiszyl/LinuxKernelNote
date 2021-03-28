@@ -46,20 +46,27 @@ struct device_node;
  *               to wrong parameters or error conditions. Called from the
  *               CPU being suspended. Must be called with IRQs disabled.
  */
+ /* 该接口提供了一些CPU操作相关的回调函数，由底层代码（可以称作cpu ops driver）
+  *	根据实际情况实现，并由ARM64的SMP模块调用
+  */
 struct cpu_operations {
-	const char	*name;
-	int		(*cpu_init)(struct device_node *, unsigned int);
-	int		(*cpu_init_idle)(struct device_node *, unsigned int);
-	int		(*cpu_prepare)(unsigned int);
-	int		(*cpu_boot)(unsigned int);
-	void		(*cpu_postboot)(void);
+	const char	*name;//operations的名字，需要唯一
+	int		(*cpu_init)(struct device_node *, unsigned int);//cpu operations的初始化接口，会在SMP初始化时调用，
+															//cpu ops driver可以在这个接口中，完成一些必须的初始化动作，
+															//如读取寄存器值、从DTS中获取配置等
+	int		(*cpu_init_idle)(struct device_node *, unsigned int);//CPU idle有关的初始化接口，会由cpuidle driver在初始化时调用。
+																 //cpu ops driver可以在这个接口中实现和idle有关的初始化操作
+	int		(*cpu_prepare)(unsigned int);//CPU boot有关的接口，在boot前调用
+	int		(*cpu_boot)(unsigned int);//CPU boot有关的接口，在boot时调用
+	void		(*cpu_postboot)(void);//CPU boot有关的接口，在boot后调用
+//如果使能了hotplug功能，除了boot接口之外，需要额外实现用于关闭CPU（和 boot相对）的接口
 #ifdef CONFIG_HOTPLUG_CPU
 	int		(*cpu_disable)(unsigned int cpu);
 	void		(*cpu_die)(unsigned int cpu);
 	int		(*cpu_kill)(unsigned int cpu);
 #endif
 #ifdef CONFIG_ARM64_CPU_SUSPEND
-	int		(*cpu_suspend)(unsigned long);
+	int		(*cpu_suspend)(unsigned long);//如果使能了CPU suspend功能，则由cpu_suspend完成相应的suspend动作
 #endif
 };
 
