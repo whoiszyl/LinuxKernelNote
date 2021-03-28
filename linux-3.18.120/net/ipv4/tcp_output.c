@@ -3158,25 +3158,31 @@ int tcp_send_synack(struct sock *sk)
 {
 	struct sk_buff *skb;
 
+	/* 两边同时打开的时候，writequeue里有syn包等待重传 */
 	skb = tcp_write_queue_head(sk);
 	if (skb == NULL || !(TCP_SKB_CB(skb)->tcp_flags & TCPHDR_SYN)) {
 		pr_debug("%s: wrong queue state\n", __func__);
 		return -EFAULT;
 	}
 	if (!(TCP_SKB_CB(skb)->tcp_flags & TCPHDR_ACK)) {
+		/* 如果clone过，则重新生成一个skb */
 		if (skb_cloned(skb)) {
 			struct sk_buff *nskb = skb_copy(skb, GFP_ATOMIC);
 			if (nskb == NULL)
 				return -ENOMEM;
+			/* 从重传队列中删除， fastopen的话，可能有其他数据 */
 			tcp_unlink_write_queue(skb, sk);
 			__skb_header_release(nskb);
+			/* 放到队列头 */
 			__tcp_add_write_queue_head(sk, nskb);
+			/* 释放skb */
 			sk_wmem_free_skb(sk, skb);
 			sk->sk_wmem_queued += nskb->truesize;
 			sk_mem_charge(sk, nskb->truesize);
 			skb = nskb;
 		}
 
+		/* 为原来的syn包，设置ack标记，发送synack */
 		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_ACK;
 		tcp_ecn_send_synack(sk, skb);
 	}
@@ -3575,6 +3581,7 @@ void __tcp_send_ack(struct sock *sk, u32 rcv_nxt)
 	 * tcp_transmit_skb() will set the ownership to this
 	 * sock.
 	 */
+	 /* 分配skb用于组装ACK报文 */
 	buff = alloc_skb(MAX_TCP_HEADER, sk_gfp_atomic(sk, GFP_ATOMIC));
 	if (buff == NULL) {
 		inet_csk_schedule_ack(sk);
@@ -3585,10 +3592,12 @@ void __tcp_send_ack(struct sock *sk, u32 rcv_nxt)
 	}
 
 	/* Reserve space for headers and prepare control bits. */
+	/* 初始化ACK报文 */
 	skb_reserve(buff, MAX_TCP_HEADER);
 	tcp_init_nondata_skb(buff, tcp_acceptable_seq(sk), TCPHDR_ACK);
 
 	/* Send it off, this clears delayed acks for us. */
+	/* 发送该确认报文 */
 	skb_mstamp_get(&buff->skb_mstamp);
 	__tcp_transmit_skb(sk, buff, 0, sk_gfp_atomic(sk, GFP_ATOMIC), rcv_nxt);
 }

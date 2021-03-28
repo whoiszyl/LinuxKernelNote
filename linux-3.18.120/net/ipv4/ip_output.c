@@ -940,7 +940,9 @@ static inline int ip_ufo_append_data(struct sock *sk,
 	 * udp datagram
 	 */
 	if ((skb = skb_peek_tail(queue)) == NULL) {
+		/* 分配skb空间 */
 		skb = sock_alloc_send_skb(sk,
+			/* 这部分在skb head区 */
 			hh_len + fragheaderlen + transhdrlen + 20,
 			(flags & MSG_DONTWAIT), &err);
 
@@ -961,7 +963,7 @@ static inline int ip_ufo_append_data(struct sock *sk,
 
 		skb->csum = 0;
 
-
+		/* 把这个不带数据部分的skb，插入队列中 */
 		__skb_queue_tail(queue, skb);
 	} else if (skb_is_gso(skb)) {
 		goto append;
@@ -973,6 +975,7 @@ static inline int ip_ufo_append_data(struct sock *sk,
 	skb_shinfo(skb)->gso_type = SKB_GSO_UDP;
 
 append:
+	/* copy数据部分到frag */
 	return skb_append_datato_frags(sk, skb, getfrag, from,
 				       (length - transhdrlen));
 }
@@ -1036,6 +1039,7 @@ static int __ip_append_data(struct sock *sk,
 	 * it won't be fragmented in the future.
 	 */
 	if (transhdrlen &&
+		/* sizeof(struct udphdr) */
 	    length + fragheaderlen <= mtu &&
 	    rt->dst.dev->features & NETIF_F_V4_CSUM &&
 	    !exthdrlen)
@@ -1055,6 +1059,7 @@ static int __ip_append_data(struct sock *sk,
 	    (sk->sk_protocol == IPPROTO_UDP) &&
 	    (rt->dst.dev->features & NETIF_F_UFO) && !rt->dst.header_len &&
 	    (sk->sk_type == SOCK_DGRAM))) {
+	    /* 支持ufo   创建ufo skb，添加数据到frag中*/
 		err = ip_ufo_append_data(sk, queue, getfrag, from, length,
 					 hh_len, fragheaderlen, transhdrlen,
 					 maxfraglen, flags);
@@ -1069,8 +1074,9 @@ static int __ip_append_data(struct sock *sk,
 	 * each of segments is IP fragment ready for sending to network after
 	 * adding appropriate IP header.
 	 */
-
+	/* 下面是不支持gso/ufo的处理 */
 	if (!skb)
+		/* 队列中没有skb，则需要创建新的 */
 		goto alloc_new_skb;
 
 	while (length > 0) {
@@ -1093,6 +1099,7 @@ static int __ip_append_data(struct sock *sk,
          * 新分配的SKB中去。
          */
 		if (copy <= 0) {
+			/* 剩余空间不够，创建新的skb插入 */
 			char *data;
             /*
              * 如果上一个SKB（通常是在调用ip_append_data()时，
@@ -1250,6 +1257,7 @@ alloc_new_skb:
 			/*
 			 * Put the packet on the pending queue.
 			 */
+			 /* 把新的skb插入队列 */
 			__skb_queue_tail(queue, skb);
 			continue;
 		}
@@ -1257,11 +1265,13 @@ alloc_new_skb:
 		if (copy > length)
 			copy = length;
 
+		/* 不支持sg，copy数据到head区 */
 		if (!(rt->dst.dev->features&NETIF_F_SG) &&
 		    skb_tailroom(skb) >= copy) {
 			unsigned int off;
 
 			off = skb->len;
+			/* ip_generic_getfrag */
 			if (getfrag(from, skb_put(skb, copy),
 					offset, copy, off, skb) < 0) {
 				__skb_trim(skb, off);
@@ -1269,6 +1279,7 @@ alloc_new_skb:
 				goto error;
 			}
 		} else {
+			/* 支持sg，copy数据到frag */
 			int i = skb_shinfo(skb)->nr_frags;
 
 			err = -ENOMEM;
@@ -1378,6 +1389,7 @@ int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 		return 0;
 
 	if (skb_queue_empty(&sk->sk_write_queue)) {
+		/* sk_write_queue为空，初始化cork */
 		err = ip_setup_cork(sk, &inet->cork.base, ipc, rtp);
 		if (err)
 			return err;
@@ -1385,6 +1397,7 @@ int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 		transhdrlen = 0;
 	}
 
+	/* 添加skb到sk_write_queue */
 	return __ip_append_data(sk, fl4, &sk->sk_write_queue, &inet->cork.base,
 				sk_page_frag(sk), getfrag,
 				from, length, transhdrlen, flags);
@@ -1713,6 +1726,7 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 	if (err)
 		return ERR_PTR(err);
 
+	/* 创建添加copy数据到skb， 并放入queue中 */
 	err = __ip_append_data(sk, fl4, &queue, &cork,
 			       &current->task_frag, getfrag,
 			       from, length, transhdrlen, flags);
@@ -1721,6 +1735,7 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 		return ERR_PTR(err);
 	}
 
+	/* 把queue中所有skb都合并到一个skb及其frag_list中， 并设置好ip头 */
 	return __ip_make_skb(sk, fl4, &queue, &cork);
 }
 

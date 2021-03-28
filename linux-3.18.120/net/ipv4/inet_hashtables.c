@@ -65,12 +65,16 @@ struct inet_bind_bucket *inet_bind_bucket_create(struct kmem_cache *cachep,
 	struct inet_bind_bucket *tb = kmem_cache_alloc(cachep, GFP_ATOMIC);
 
 	if (tb != NULL) {
+		/* 指定网络命名空间 */
 		write_pnet(&tb->ib_net, hold_net(net));
+		/* 指定绑定端口 */
 		tb->port      = snum;
 		tb->fastreuse = 0;
 		tb->fastreuseport = 0;
+		/* 初始化owners哈希链表 */
 		tb->num_owners = 0;
 		INIT_HLIST_HEAD(&tb->owners);
+		/* 把此inet_bind_bucket实例添加到哈希桶中 */
 		hlist_add_head(&tb->node, &head->chain);
 	}
 	return tb;
@@ -94,13 +98,19 @@ void inet_bind_bucket_destroy(struct kmem_cache *cachep, struct inet_bind_bucket
 void inet_bind_hash(struct sock *sk, struct inet_bind_bucket *tb,
 		    const unsigned short snum)
 {
-	struct inet_hashinfo *hashinfo = sk->sk_prot->h.hashinfo; //tcp 为tcp_hashinfo
+	/* 指向tcp_hashinfo */
+	struct inet_hashinfo *hashinfo = sk->sk_prot->h.hashinfo;
 
+	/* 增加总的绑定次数 */
 	atomic_inc(&hashinfo->bsockets);
 
+	/* 保存绑定的端口 */
 	inet_sk(sk)->inet_num = snum;
+	/* 把此sock链入tb->owners哈希链表中 */
 	sk_add_bind_node(sk, &tb->owners);
+	/* 增加端口绑定次数 */
 	tb->num_owners++;
+	/* 把此tb作为icsk成员icsk_bind_hash */
 	inet_csk(sk)->icsk_bind_hash = tb;
 }
 
@@ -436,22 +446,28 @@ int __inet_hash_nolisten(struct sock *sk, struct inet_timewait_sock *tw)
 }
 EXPORT_SYMBOL_GPL(__inet_hash_nolisten);
 
+/* 把sock链接入tcp_hashinfo->listening_hash哈希表 */
 static void __inet_hash(struct sock *sk)
 {
 	struct inet_hashinfo *hashinfo = sk->sk_prot->h.hashinfo;
 	struct inet_listen_hashbucket *ilb;
 
+	/* sock不处于listen状态时 */
 	if (sk->sk_state != TCP_LISTEN) {  //把sk添加到tcp_hashinfo的ehash中
+		/* 这里对应的是已建立的连接 */
 		__inet_hash_nolisten(sk, NULL);
 		return;
 	}
 
     //把sk添加到tcp_hashinfo的listening_hash中
 	WARN_ON(!sk_unhashed(sk));
+	/* 根据端口号，找到对应的监听哈希桶 */
 	ilb = &hashinfo->listening_hash[inet_sk_listen_hashfn(sk)];
 
 	spin_lock(&ilb->lock);
+	/* 把sock放入监听哈希桶的头，链接节点为sk->sk_nulls_node */
 	__sk_nulls_add_node_rcu(sk, &ilb->head);
+	/* 此CPU上该协议的使用数加一 */
 	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
 	spin_unlock(&ilb->lock);
 }

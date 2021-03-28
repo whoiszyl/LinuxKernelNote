@@ -4433,6 +4433,9 @@ static int vmx_vcpu_setup(struct vcpu_vmx *vmx)
 #endif
 	int i;
 
+	/* 在对vcpu进行初始化的时候会把这个bitmap A和B的地址写入到vmcs中去，
+	 * 这样 就建立了对IO port的访问的截获。
+	 */
 	/* I/O */
 	vmcs_write64(IO_BITMAP_A, __pa(vmx_io_bitmap_a));
 	vmcs_write64(IO_BITMAP_B, __pa(vmx_io_bitmap_b));
@@ -5009,19 +5012,27 @@ static int handle_io(struct kvm_vcpu *vcpu)
 	int size, in, string;
 	unsigned port;
 
+	//获取exit qualification
 	exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
+	//判断是否为string io (ins, outs
 	string = (exit_qualification & 16) != 0;
+	//判断io方向，是in  还是out
 	in = (exit_qualification & 8) != 0;
 
 	++vcpu->stat.io_exits;
 
-	if (string || in)
+	 //如果是输入类的指令，或者是string io，就进入emulator处理
+	 if (string || in)
 		return emulate_instruction(vcpu, 0) == EMULATE_DONE;
 
+	//得到端口号
 	port = exit_qualification >> 16;
+	//大小
 	size = (exit_qualification & 7) + 1;
+	//跳过这个指令
 	skip_emulated_instruction(vcpu);
 
+	//进行out操作
 	return kvm_fast_pio_out(vcpu, size, port);
 }
 
@@ -7577,6 +7588,9 @@ static void atomic_switch_perf_msrs(struct vcpu_vmx *vmx)
 					msrs[i].host);
 }
 
+/*
+ * 运行虚拟机，进入Guest模式，即non root模式
+ */
 static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
@@ -7601,8 +7615,10 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		vmx->nested.sync_shadow_vmcs = false;
 	}
 
+	/* 写入Guest的RSP寄存器信息至VMCS相关位置中 */
 	if (test_bit(VCPU_REGS_RSP, (unsigned long *)&vcpu->arch.regs_dirty))
 		vmcs_writel(GUEST_RSP, vcpu->arch.regs[VCPU_REGS_RSP]);
+	/* 写入Guest的RIP寄存器信息至VMCS相关位置中 */
 	if (test_bit(VCPU_REGS_RIP, (unsigned long *)&vcpu->arch.regs_dirty))
 		vmcs_writel(GUEST_RIP, vcpu->arch.regs[VCPU_REGS_RIP]);
 
@@ -7617,6 +7633,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	 * vmentry fails as it then expects bit 14 (BS) in pending debug
 	 * exceptions being set, but that's not correct for the guest debugging
 	 * case. */
+	 /* 单步调试时，需要禁用Guest中断 */
 	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
 		vmx_set_interrupt_shadow(vcpu, 0);
 
@@ -7624,17 +7641,35 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	debugctlmsr = get_debugctlmsr();
 
 	vmx->__launched = vmx->loaded_vmcs->launched;
+	/* 执行VMLAUNCH指令进入Guest模式，虚拟机开始运行 */
 	asm(
 		/* Store host registers */
+		/* 将相关寄存器压栈 */
 		"push %%" _ASM_DX "; push %%" _ASM_BP ";"
+		/* 为guest的rcx寄存器保留个位置，所以这里压两次栈 */
 		"push %%" _ASM_CX " \n\t" /* placeholder for guest rcx */
 		"push %%" _ASM_CX " \n\t"
+		/*
+         * %c表示用来表示使用立即数替换，但不使用立即数的语法，at&t汇编中表示立即数的语法前面有一个$，而用了%c后，就去掉了这个$。
+         * 主要是用在间接寻址的情况，这种情况下如果直接使用$立即数的方式的话，会报语法错误。
+         * [host_rsp]是后面输入部分定义的tag，使用%tag方式可以直接引用，%0是后面输入输出部分中的第一个操作数，即vmx，这里是间接寻址
+         * %c[host_rsp](%0)整体来看就是vmx(以寄存器ecx传入)中的host_rsp成员。
+         * 所以，如下语句的整体含义就是比较当前SP寄存器和vmx->host_rsp的值。
+         */
+        /* 如果当前RSP和vmx->rsp相等，那就不用mov了，否则将当前RSP保存到vmx中 */
 		"cmp %%" _ASM_SP ", %c[host_rsp](%0) \n\t"
 		"je 1f \n\t"
 		"mov %%" _ASM_SP ", %c[host_rsp](%0) \n\t"
+		/*
+         * 执行ASM_VMX_VMWRITE_RSP_RDX指令(Writes the contents of a primary source operand (register or memory) to a specified field in a VMCS，
+         * 即将RSP的值写入vmcs中，field由RDX寄存器指定，而此时的RDX寄存器的内容由后面的约束条件:"d"((unsigned long)HOST_RSP指定为HOST_RSP，
+         * 所以这句命令的作用为:将rsp的值写vmcs，field是HOST_RSP。)，当出现异常时直接重启，由__ex()实现
+         */
 		__ex(ASM_VMX_VMWRITE_RSP_RDX) "\n\t"
 		"1: \n\t"
 		/* Reload cr2 if changed */
+		/* 比较当前CR2寄存器和vmx中保存的CR2寄存器内容，如果不相等，就从vmx中重新CR2内容到当前CR2寄存器中 */
+        "mov %c[cr2](%0), %%" _ASM_AX " \n\t"
 		"mov %c[cr2](%0), %%" _ASM_AX " \n\t"
 		"mov %%cr2, %%" _ASM_DX " \n\t"
 		"cmp %%" _ASM_AX ", %%" _ASM_DX " \n\t"
@@ -7642,8 +7677,10 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		"mov %%" _ASM_AX", %%cr2 \n\t"
 		"2: \n\t"
 		/* Check if vmlaunch of vmresume is needed */
+	    /* 判断vcpu_vmx->__launched，确认是否需要执行VMLAUNCH */
 		"cmpl $0, %c[launched](%0) \n\t"
 		/* Load guest registers.  Don't clobber flags. */
+		/* 加载guest寄存器，其实就是从vmx中加载 */
 		"mov %c[rax](%0), %%" _ASM_AX " \n\t"
 		"mov %c[rbx](%0), %%" _ASM_BX " \n\t"
 		"mov %c[rdx](%0), %%" _ASM_DX " \n\t"
@@ -7664,8 +7701,10 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 
 		/* Enter guest mode */
 		"jne 1f \n\t"
+		/* 执行VMLAUNCH指令，进入Guest模式 */
 		__ex(ASM_VMX_VMLAUNCH) "\n\t"
 		"jmp 2f \n\t"
+		/* 执行VMRESUME指令，从Guest模式恢复到root模式 */
 		"1: " __ex(ASM_VMX_VMRESUME) "\n\t"
 		"2: "
 		/* Save guest registers, load host registers, keep flags */
@@ -7712,6 +7751,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	      : : "c"(vmx), "d"((unsigned long)HOST_RSP),
 		[launched]"i"(offsetof(struct vcpu_vmx, __launched)),
 		[fail]"i"(offsetof(struct vcpu_vmx, fail)),
+		 /* [host_rsp]是tag，可以在前面以%[host_rsp]方式引用 */
 		[host_rsp]"i"(offsetof(struct vcpu_vmx, host_rsp)),
 		[rax]"i"(offsetof(struct vcpu_vmx, vcpu.arch.regs[VCPU_REGS_RAX])),
 		[rbx]"i"(offsetof(struct vcpu_vmx, vcpu.arch.regs[VCPU_REGS_RBX])),
@@ -7730,6 +7770,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		[r14]"i"(offsetof(struct vcpu_vmx, vcpu.arch.regs[VCPU_REGS_R14])),
 		[r15]"i"(offsetof(struct vcpu_vmx, vcpu.arch.regs[VCPU_REGS_R15])),
 #endif
+		/*clobber list，cc表示寄存器，memory表示内存*/
 		[cr2]"i"(offsetof(struct vcpu_vmx, vcpu.arch.cr2)),
 		[wordsize]"i"(sizeof(ulong))
 	      : "cc", "memory"
@@ -7740,7 +7781,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		, "eax", "ebx", "edi", "esi"
 #endif
 	      );
-
+	/* 运行到这里，说明已经发生了VM-exit，返回到了root模式 */
 	/* MSR_IA32_DEBUGCTLMSR is zeroed on vmexit. Restore it if needed */
 	if (debugctlmsr)
 		update_debugctlmsr(debugctlmsr);
@@ -7754,6 +7795,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	 * may be executed in interrupt context, which saves and restore segments
 	 * around it, nullifying its effect.
 	 */
+	/* 重新加载ds/es段寄存器，因为VM-exit不会自动加载他们 */
 	loadsegment(ds, __USER_DS);
 	loadsegment(es, __USER_DS);
 #endif
@@ -7765,10 +7807,12 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 				  | (1 << VCPU_EXREG_CR3));
 	vcpu->arch.regs_dirty = 0;
 
+	/* 从硬件VMCS中读取中断向量表信息 */
 	vmx->idt_vectoring_info = vmcs_read32(IDT_VECTORING_INFO_FIELD);
 
 	vmx->loaded_vmcs->launched = 1;
 
+	/* 从硬件VMCS中读取VM-exit原因信息，这些信息是VM-exit过程中由硬件自动写入的 */
 	vmx->exit_reason = vmcs_read32(VM_EXIT_REASON);
 	trace_kvm_exit(vmx->exit_reason, vcpu, KVM_ISA_VMX);
 
@@ -7782,6 +7826,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 
 	vmx->nested.nested_run_pending = 0;
 
+	/* 处理MCE异常和NMI中断 */
 	vmx_complete_atomic_exit(vmx);
 	vmx_recover_nmi_blocking(vmx);
 	vmx_complete_interrupts(vmx);
@@ -7832,21 +7877,28 @@ static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
 	kmem_cache_free(kvm_vcpu_cache, vmx);
 }
 
+/*
+ * Intel x86架构中创建并初始化VCPU中架构相关部分
+ */
 static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 {
 	int err;
+	/* 从slab中，分配vcpu_vmx结构体，其中包括VMX技术硬件相关信息。*/
 	struct vcpu_vmx *vmx = kmem_cache_zalloc(kvm_vcpu_cache, GFP_KERNEL);
 	int cpu;
 
 	if (!vmx)
 		return ERR_PTR(-ENOMEM);
 
+	/* 分配vpid，vpid为VCPU的唯一标识。*/
 	allocate_vpid(vmx);
 
+	/*  初始化vmx中的vcpu结构 */
 	err = kvm_vcpu_init(&vmx->vcpu, kvm, id);
 	if (err)
 		goto free_vcpu;
 
+	/* 分配Guest的msr寄存器保存区 */
 	vmx->guest_msrs = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	BUILD_BUG_ON(ARRAY_SIZE(vmx_msr_index) * sizeof(vmx->guest_msrs[0])
 		     > PAGE_SIZE);
@@ -7857,18 +7909,30 @@ static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 	}
 
 	vmx->loaded_vmcs = &vmx->vmcs01;
+	 /* 
+      * 分配VMCS结构，该结构用于保存虚拟机和虚拟机监控器的系统编程接口状态。
+      * 当执行VM exit和VM entry操作时，VT-x自动根据VMCS中的内容完成虚拟机和虚拟机监
+      * 控器间的系统编程接口状态切换。
+      */
 	vmx->loaded_vmcs->vmcs = alloc_vmcs();
 	if (!vmx->loaded_vmcs->vmcs)
 		goto free_msrs;
+	/* 是否设置了vmm_exclusive */
 	if (!vmm_exclusive)
+		/* VMXON指令用于开启VMX模式 */
 		kvm_cpu_vmxon(__pa(per_cpu(vmxarea, raw_smp_processor_id())));
 	loaded_vmcs_init(vmx->loaded_vmcs);
+	/* 是否设置了vmm_exclusive */
 	if (!vmm_exclusive)
+		/* VMXON指令用于关闭VMX模式 */
 		kvm_cpu_vmxoff();
 
+	/* 获取当前CPU*/
 	cpu = get_cpu();
+	/* KVM虚拟机VCPU数据结构载入物理CPU */
 	vmx_vcpu_load(&vmx->vcpu, cpu);
 	vmx->vcpu.cpu = cpu;
+	/* 设置vmx相关信息 */
 	err = vmx_vcpu_setup(vmx);
 	vmx_vcpu_put(&vmx->vcpu);
 	put_cpu();
@@ -7880,7 +7944,13 @@ static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 			goto free_vmcs;
 	}
 
+	/* 是否支持EPT 
+	 * EPT的作用就是用于在vmx non-root模式下转换 
+	 * guest-physical addresses --> physical addresses 
+	 * 当前的上下文在guest OS环境中。已经不再vmx root, hypervisor中。
+	 */
 	if (enable_ept) {
+		/* 分配identity页表并初始化 */
 		if (!kvm->arch.ept_identity_map_addr)
 			kvm->arch.ept_identity_map_addr =
 				VMX_EPT_IDENTITY_PAGETABLE_ADDR;
@@ -9274,6 +9344,12 @@ static int __init vmx_init(void)
 	for (i = 0; i < ARRAY_SIZE(vmx_msr_index); ++i)
 		kvm_define_shared_msr(i, vmx_msr_index[i]);
 
+	/*
+	 * 定义了两个全局变量表示bitmap A和B的地址。 
+	 * 在vmx_init函数中这两个指针都被分配了一个页大小的空间，
+	 * 之后所有位都置1，然后在bitmap A中对第 80位进行了清零，
+	 * 也就是客户机访问这个0x80端口不会发生vm exit。
+	 */
 	vmx_io_bitmap_a = (unsigned long *)__get_free_page(GFP_KERNEL);
 	if (!vmx_io_bitmap_a)
 		return -ENOMEM;

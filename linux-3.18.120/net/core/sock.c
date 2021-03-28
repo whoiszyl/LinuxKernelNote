@@ -2198,22 +2198,28 @@ EXPORT_SYMBOL(sock_no_sendpage);
 
 static void sock_def_wakeup(struct sock *sk)
 {
+	/* socket的等待队列和异步通知队列 */
 	struct socket_wq *wq;
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
+	/* 有进程阻塞在此socket上 */
 	if (wq_has_sleeper(wq))
+		/* 唤醒此socket上的所有睡眠进程 */
 		wake_up_interruptible_all(&wq->wait);
 	rcu_read_unlock();
 }
 
 static void sock_def_error_report(struct sock *sk)
 {
+	/* 等待队列和异步通知队列 */
 	struct socket_wq *wq;
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
+	/* 有进程阻塞在此socket上 */
 	if (wq_has_sleeper(wq))
+		/* 如果使用了异步通知，则发送SIGIO信号通知进程有错误 */
 		wake_up_interruptible_poll(&wq->wait, POLLERR);
 	sk_wake_async(sk, SOCK_WAKE_IO, POLL_ERR);
 	rcu_read_unlock();
@@ -2221,13 +2227,22 @@ static void sock_def_error_report(struct sock *sk)
 
 static void sock_def_readable(struct sock *sk)
 {
+	/* socket的等待队列和异步通知队列 */
 	struct socket_wq *wq;
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
+	/* 有进程在此socket的等待队列 */
 	if (wq_has_sleeper(wq))
+		/* 唤醒等待进程 */
 		wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI |
 						POLLRDNORM | POLLRDBAND);
+	/* 
+	 * 异步通知队列的处理。 
+	 * 检查应用程序是否通过recv()类调用来等待接收数据，如果没有就发送SIGIO信号，
+	 * 告知它有数据可读。
+	 * how为函数的处理方式，band为用来告知的IO类型。
+	 */
 	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
 	rcu_read_unlock();
 }
@@ -2285,18 +2300,24 @@ EXPORT_SYMBOL(sk_stop_timer);
 
 void sock_init_data(struct socket *sock, struct sock *sk)
 {
+	 /* 
+	  * 初始化其三个队列,队列中指向的每一个 skb_buffer，
+	  * 就是一个数据包，分别是接收、发送和投递错误 
+	  */ 
 	skb_queue_head_init(&sk->sk_receive_queue);
 	skb_queue_head_init(&sk->sk_write_queue);
 	skb_queue_head_init(&sk->sk_error_queue);
 
 	sk->sk_send_head	=	NULL;
 
+	/* 初始化数据包发送定时器 */ 
 	init_timer(&sk->sk_timer);
 
 	sk->sk_allocation	=	GFP_KERNEL;
 	sk->sk_rcvbuf		=	sysctl_rmem_default;
 	sk->sk_sndbuf		=	sysctl_wmem_default;
 	sk->sk_state		=	TCP_CLOSE;
+	/* 指向对应的 socket 结构 */ 
 	sk_set_socket(sk, sock);
 
 	sock_set_flag(sk, SOCK_ZAPPED);
@@ -2304,6 +2325,7 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	if (sock) {
 		sk->sk_type	=	sock->type;
 		sk->sk_wq	=	sock->wq;
+	 	/* 回指对应的 scok 结构 */ 
 		sock->sk	=	sk;
 	} else
 		sk->sk_wq	=	NULL;
@@ -2314,9 +2336,13 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 			af_callback_keys + sk->sk_family,
 			af_family_clock_key_strings[sk->sk_family]);
 
+	/* sock状态改变事件 */
 	sk->sk_state_change	=	sock_def_wakeup;
+	/* sock有数据可读事件 */
 	sk->sk_data_ready	=	sock_def_readable;
+	/* sock有发送缓存可写事件 */
 	sk->sk_write_space	=	sock_def_write_space;
+	/* sock有IO错误事件 */
 	sk->sk_error_report	=	sock_def_error_report;
 	sk->sk_destruct		=	sock_def_destruct;
 

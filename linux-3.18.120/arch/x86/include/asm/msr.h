@@ -171,6 +171,7 @@ static inline int wrmsr_safe(unsigned msr, unsigned low, unsigned high)
 	__err;							\
 })
 
+//¶Ámsr
 static inline int rdmsrl_safe(unsigned msr, unsigned long long *p)
 {
 	int err;

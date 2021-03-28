@@ -236,12 +236,12 @@ typedef struct siginfo {
 /*
  * SIGPOLL si_codes
  */
-#define POLL_IN		(__SI_POLL|1)	/* data input available */
-#define POLL_OUT	(__SI_POLL|2)	/* output buffers available */
-#define POLL_MSG	(__SI_POLL|3)	/* input message available */
-#define POLL_ERR	(__SI_POLL|4)	/* i/o error */
-#define POLL_PRI	(__SI_POLL|5)	/* high priority input available */
-#define POLL_HUP	(__SI_POLL|6)	/* device disconnected */
+#define POLL_IN		(__SI_POLL|1)	/* data input available 有接收数据可读 */
+#define POLL_OUT	(__SI_POLL|2)	/* output buffers available 有输出缓存可写 */
+#define POLL_MSG	(__SI_POLL|3)	/* input message available 有输入消息可读 */
+#define POLL_ERR	(__SI_POLL|4)	/* i/o error I/O错误  */
+#define POLL_PRI	(__SI_POLL|5)	/* high priority input available 有紧急数据可读 */
+#define POLL_HUP	(__SI_POLL|6)	/* device disconnected 设备关闭或文件关闭，无法继续读写 */
 #define NSIGPOLL	6
 
 /*

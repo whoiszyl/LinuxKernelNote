@@ -1804,8 +1804,14 @@ static inline u32 tcp_notsent_lowat(const struct tcp_sock *tp)
 static inline bool tcp_stream_memory_free(const struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
+	 /* 尚未发送的数据大小 */
 	u32 notsent_bytes = tp->write_seq - tp->snd_nxt;
 
+
+    /* 
+     * 当尚未发送的数据，少于配置的值时，才触发有发送缓存可写的事件。
+     * 这是为了避免发送缓存占用过多的内存。
+     */
 	return notsent_bytes < tcp_notsent_lowat(tp);
 }
 

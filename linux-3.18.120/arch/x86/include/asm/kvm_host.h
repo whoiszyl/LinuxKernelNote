@@ -346,6 +346,7 @@ struct kvm_vcpu_arch {
 	u32 regs_avail;
 	u32 regs_dirty;
 
+	/* 类似这些寄存器就是就是用来缓存真正的CPU值的 */
 	unsigned long cr0;
 	unsigned long cr0_guest_owned_bits;
 	unsigned long cr2;
@@ -370,6 +371,7 @@ struct kvm_vcpu_arch {
 	 * the paging mode of the l1 guest. This context is always used to
 	 * handle faults.
 	 */
+	/* 内存管理，更多的是附带了直接操作函数 */
 	struct kvm_mmu mmu;
 
 	/*

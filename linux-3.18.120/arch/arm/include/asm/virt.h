@@ -55,6 +55,22 @@ static inline void sync_boot_mode(void)
 void __hyp_set_vectors(unsigned long phys_vector_base);
 unsigned long __hyp_get_vectors(void);
 #else
+/* 数组__boot_cpu_mode[2]记录了CPUs启动的模式，正确的bootloader
+ * 必须把所有CPUs启动到相同的模式上，即数组的两个元素必须一样，
+ * 如果两者不相等，表明bootloader可能出错了。
+ * 第一个元素的静态初始化值是BOOT_CPU_MODE_EL2，第二个元素的静态初始化值是BOOT_CPU_MODE_EL1。
+ * 在arch/arm64/kernel/head.S文件中的汇编函数el2_setup动态识别本地cpu的模式，
+ * w0记录本地cpu模式；然后如果本地cpu模式是BOOT_CPU_MODE_EL2，
+ * 汇编函数setup_cpu_boot_mode_flag就将第二个元素修改为BOOT_CPU_MODE_EL2。
+ * 如果需要支持KVM，则必须从EL2开始启动，即Kernel的入口在EL2执行
+
+ *	EL0	运行用户程序
+ *	EL1	操作系统内核
+ *	EL2	Hypervisor (可以理解为上面跑多个虚拟内核)
+ *	EL3	Secure Monitor(ARM Trusted Firmware)
+ *  https://blog.csdn.net/ganyao939543405/article/details/85204534
+ */
+
 #define __boot_cpu_mode	(SVC_MODE)
 #define sync_boot_mode()
 #endif

@@ -1130,8 +1130,11 @@ static inline int lease_modify(struct file_lock **before, int arg,
 struct fasync_struct {
 	spinlock_t		fa_lock;
 	int			magic;
+	/* 文件描述符 */
 	int			fa_fd;
+	/* 用于链入单向链表 */
 	struct fasync_struct	*fa_next; /* singly linked list */
+	/* fa_file->f_owner记录接收信号的进程 */
 	struct file		*fa_file;
 	struct rcu_head		fa_rcu;
 };

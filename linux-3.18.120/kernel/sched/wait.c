@@ -186,10 +186,13 @@ prepare_to_wait_exclusive(wait_queue_head_t *q, wait_queue_t *wait, int state)
 {
 	unsigned long flags;
 
+	/* 这个标志表示一次只唤醒一个等待任务，避免惊群现象 */
 	wait->flags |= WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&q->lock, flags);
 	if (list_empty(&wait->task_list))
+		 /* 把此等待任务加入到等待队列中 */
 		__add_wait_queue_tail(q, wait);
+	/* 设置当前进程的状态 */
 	set_current_state(state);
 	spin_unlock_irqrestore(&q->lock, flags);
 }
@@ -248,6 +251,7 @@ void finish_wait(wait_queue_head_t *q, wait_queue_t *wait)
 	 */
 	if (!list_empty_careful(&wait->task_list)) {
 		spin_lock_irqsave(&q->lock, flags);
+		/* 从等待队列中删除，初始化此等待任务 */
 		list_del_init(&wait->task_list);
 		spin_unlock_irqrestore(&q->lock, flags);
 	}
@@ -289,9 +293,11 @@ EXPORT_SYMBOL(abort_exclusive_wait);
 
 int autoremove_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *key)
 {
+	/* 默认的唤醒函数 */
 	int ret = default_wake_function(wait, mode, sync, key);
 
 	if (ret)
+		/* 从等待队列中删除，初始化此等待任务 */
 		list_del_init(&wait->task_list);
 	return ret;
 }

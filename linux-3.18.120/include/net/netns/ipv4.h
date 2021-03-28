@@ -16,7 +16,7 @@ struct hlist_head;
 struct fib_table;
 struct sock;
 struct local_ports {
-	seqlock_t	lock;
+	seqlock_t	lock;/* 顺序锁，读多写少，写优先 */
 	int		range[2];
 };
 
@@ -87,6 +87,7 @@ struct netns_ipv4 {
 	atomic_t dev_addr_genid;
 
 #ifdef CONFIG_SYSCTL
+	/* 用于系统自动分配的端口区间    ，保存在  /proc/sys/net/ipv4/ip_local_port_range*/
 	unsigned long *sysctl_local_reserved_ports;
 #endif
 

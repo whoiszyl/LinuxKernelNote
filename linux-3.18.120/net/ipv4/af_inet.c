@@ -207,7 +207,9 @@ int inet_listen(struct socket *sock, int backlog)
 	if (sock->state != SS_UNCONNECTED || sock->type != SOCK_STREAM)
 		goto out;
 
+	/* 当前连接状态 */
 	old_state = sk->sk_state;
+	/* 当前的连接需为CLOSED或LISTEN状态 */
 	if (!((1 << old_state) & (TCPF_CLOSE | TCPF_LISTEN)))
 		goto out;
 
@@ -237,10 +239,12 @@ int inet_listen(struct socket *sock, int backlog)
 
 			tcp_fastopen_init_key_once(true);
 		}
+		/* 启动监听 */
 		err = inet_csk_listen_start(sk, backlog);
 		if (err)
 			goto out;
 	}
+	/* 最大全连接队列长度 */
 	sk->sk_max_ack_backlog = backlog;
 	err = 0;
 
@@ -326,6 +330,7 @@ lookup_protocol:
 	 */
 		goto out_rcu_unlock;
 
+	/*  sock->ops指向inet_stream_ops，然后创建sk */
 	sock->ops = answer->ops;
 	answer_prot = answer->prot;
 	answer_flags = answer->flags;
@@ -346,6 +351,7 @@ lookup_protocol:
 	if (INET_PROTOSW_REUSE & answer_flags)
 		sk->sk_reuse = SK_CAN_REUSE;
 
+	/* 设置inet的一些参数，这里直接将sk类型转换为inet */
 	inet = inet_sk(sk);
 	inet->is_icsk = (INET_PROTOSW_ICSK & answer_flags) != 0;
 
@@ -364,6 +370,7 @@ lookup_protocol:
 
 	inet->inet_id = 0;
 
+	/* 将sock与sk关联起来 */
 	sock_init_data(sock, sk);
 
 	sk->sk_destruct	   = inet_sock_destruct;
@@ -391,6 +398,7 @@ lookup_protocol:
 		sk->sk_prot->hash(sk);
 	}
 
+	/* 调用init函数 */
 	if (sk->sk_prot->init) {
 		err = sk->sk_prot->init(sk);
 		if (err)
@@ -448,10 +456,14 @@ EXPORT_SYMBOL(inet_release);
 int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sockaddr_in *addr = (struct sockaddr_in *)uaddr;
+	/* 传输层实例 */
 	struct sock *sk = sock->sk;
+	/* INET实例 */
 	struct inet_sock *inet = inet_sk(sk);
 	struct net *net = sock_net(sk);
+	/* 要绑定的端口 */
 	unsigned short snum;
+	/* IP地址类型 */
 	int chk_addr_ret;
 	int err;
 
@@ -466,9 +478,11 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		goto out;
 	}
 	err = -EINVAL;
+	/* socket地址长度错误 */
 	if (addr_len < sizeof(struct sockaddr_in))
 		goto out;
 
+	/* 非INET协议族 */
 	if (addr->sin_family != AF_INET) {
 		/* Compatibility games : accept AF_UNSPEC (mapped to AF_INET)
 		 * only if s_addr is INADDR_ANY.
@@ -479,6 +493,7 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 			goto out;
 	}
 
+	/* 在路由中检查IP地址类型，单播、多播还是广播 */
 	chk_addr_ret = inet_addr_type(net, addr->sin_addr.s_addr);
 
 	/* Not specified by any standard per-se, however it breaks too
@@ -488,6 +503,11 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	 * (ie. your servers still start up even if your ISDN link
 	 *  is temporarily down)
 	 */
+	 
+    /* sysctl_ip_nonlocal_bind表示是否允许绑定非本地的IP地址。
+     * inet->freebind表示是否允许绑定非主机地址。
+     * 这里需要允许绑定非本地地址，除非是发送给自己、多播或广播。
+     */
 	err = -EADDRNOTAVAIL;
 	if (!net->ipv4.sysctl_ip_nonlocal_bind &&
 	    !(inet->freebind || inet->transparent) &&
@@ -497,12 +517,15 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	    chk_addr_ret != RTN_BROADCAST)
 		goto out;
 
+	/* 要绑定的端口 */
 	snum = ntohs(addr->sin_port);
 	err = -EACCES;
-	/*
-	 * 如果绑定的端口号小于1024(保留端口号)，但是
-	 * 当前用户没有CAP_NET_BIND_SERVICE权限，则返回EACCESS错误。
-	 */
+	
+    /*
+     * snum为0表示让系统随机选择一个未使用的端口，因此是合法的。
+     * 如要需要绑定的端口为1 ~ 1023，则需要对应的特权。
+     */
+	if (snum && snum < PROT_SOCK &&
 	    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE))
 		goto out;
 
@@ -524,21 +547,30 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	if (sk->sk_state != TCP_CLOSE || inet->inet_num)
 		goto out_release_sock;
 
+	/* 绑定地址 */
 	inet->inet_rcv_saddr = inet->inet_saddr = addr->sin_addr.s_addr;
 	if (chk_addr_ret == RTN_MULTICAST || chk_addr_ret == RTN_BROADCAST)
 		inet->inet_saddr = 0;  /* Use device */
 
 	/* Make sure we are allowed to bind here. */
+	/*
+     * 如果使用的是TCP，则sk_prot为tcp_prot，get_port为inet_csk_get_port()
+     * 端口可用的话返回0
+     */
 	if (sk->sk_prot->get_port(sk, snum)) {
 		inet->inet_saddr = inet->inet_rcv_saddr = 0;
 		err = -EADDRINUSE;
 		goto out_release_sock;
 	}
 
+	/* inet_rcv_saddr表示绑定的地址，接收数据时用于查找socket */
 	if (inet->inet_rcv_saddr)
+		/* 表示绑定了本地地址 */
 		sk->sk_userlocks |= SOCK_BINDADDR_LOCK;
 	if (snum)
+		/* 表示绑定了本地端口 */
 		sk->sk_userlocks |= SOCK_BINDPORT_LOCK;
+	/* 绑定端口 */
 	inet->inet_sport = htons(inet->inet_num);
 	inet->inet_daddr = 0;
 	inet->inet_dport = 0;
@@ -569,8 +601,10 @@ EXPORT_SYMBOL(inet_dgram_connect);
 
 static long inet_wait_for_connect(struct sock *sk, long timeo, int writebias)
 {
+	/* 初始化等待任务 */
 	DEFINE_WAIT(wait);
 
+	/* 把等待任务加入到socket的等待队列头部，把进程的状态设为TASK_INTERRUPTIBLE */
 	prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 	sk->sk_write_pending += writebias;
 
@@ -579,14 +613,26 @@ static long inet_wait_for_connect(struct sock *sk, long timeo, int writebias)
 	 * Connect() does not allow to get error notifications
 	 * without closing the socket.
 	 */
+	/* 完成三次握手后，状态就会变为TCP_ESTABLISHED，从而退出循环 */
 	while ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
-		release_sock(sk);
+		/* 进入睡眠前先将锁释放 */
+		release_sock(sk);		
+        /* 进入睡眠，直到超时或收到信号，或者被I/O事件处理函数唤醒。
+         * 1. 如果是收到信号退出的，timeo为剩余的jiffies。
+         * 2. 如果使用了SO_SNDTIMEO选项，超时退出后，timeo为0。
+         * 3. 如果没有使用SO_SNDTIMEO选项，timeo为无穷大，即MAX_SCHEDULE_TIMEOUT，
+         *    那么返回值也是这个，而超时时间不定。为了无限阻塞，需要上面的while循环。
+         */
 		timeo = schedule_timeout(timeo);
+		/* 被唤醒后重新上锁 */
 		lock_sock(sk);
+		/* 如果进程有待处理的信号，或者睡眠超时了，退出循环，之后会返回错误码 */
 		if (signal_pending(current) || !timeo)
 			break;
+		/* 继续睡眠吧 */
 		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 	}
+	/* 等待结束时，把等待进程从等待队列中删除，把当前进程的状态设为TASK_RUNNING */
 	finish_wait(sk_sleep(sk), &wait);
 	sk->sk_write_pending -= writebias;
 	return timeo;
@@ -603,11 +649,15 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	int err;
 	long timeo;
 
+	/* 检查socket地址长度 */
 	if (addr_len < sizeof(uaddr->sa_family))
 		return -EINVAL;
 
+	/* socket的协议族错误 */
 	if (uaddr->sa_family == AF_UNSPEC) {
+		/* 如果使用的是TCP，则sk_prot为tcp_prot，disconnect为tcp_disconnect() */
 		err = sk->sk_prot->disconnect(sk, flags);
+		/* 根据是否成功断开连接，来设置socket状态 */
 		sock->state = err ? SS_DISCONNECTING : SS_UNCONNECTED;
 		goto out;
 	}
@@ -616,19 +666,23 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	default:
 		err = -EINVAL;
 		goto out;
+	/* 此套接口已经和对端的套接口相连接了，即连接已经建立 */
 	case SS_CONNECTED:
 		err = -EISCONN;
 		goto out;
+	/* 此套接口正在尝试连接对端的套接口，即连接正在建立中 */
 	case SS_CONNECTING:
 		err = -EALREADY;
 		/* Fall out of switch with err, set for this state */
 		break;
-	case SS_UNCONNECTED://只有在这个状态下才能进行连接
+	/* 此套接口尚未连接对端的套接口，即连接尚未建立 */
+	case SS_UNCONNECTED:
 		err = -EISCONN;
 		if (sk->sk_state != TCP_CLOSE)
 			goto out;
 
-		err = sk->sk_prot->connect(sk, uaddr, addr_len);
+		/* 如果使用的是TCP，则sk_prot为tcp_prot，connect为tcp_v4_connect() */
+		err = sk->sk_prot->connect(sk, uaddr, addr_len);/* 发送SYN包 */
 		if (err < 0)
 			goto out;
 
@@ -642,18 +696,28 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		break;
 	}
 
+	/* sock的发送超时时间，非阻塞则为0 */
 	timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
 
+	/* 发出SYN包后，等待后续握手的完成 */
 	if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
 		int writebias = (sk->sk_protocol == IPPROTO_TCP) &&
 				tcp_sk(sk)->fastopen_req &&
 				tcp_sk(sk)->fastopen_req->data ? 1 : 0;
 
 		/* Error code is set above */
+		
+        /* 如果是非阻塞的，那么就直接返回错误码-EINPROGRESS。
+         * socket为阻塞时，使用inet_wait_for_connect()来等待协议栈的处理：
+         * 1. 使用SO_SNDTIMEO，睡眠时间超过timeo就返回0，之后返回错误码-EINPROGRESS。
+         * 2. 收到信号，就返回剩余的等待时间。之后会返回错误码-ERESTARTSYS或-EINTR。
+         * 3. 三次握手成功，被sock I/O事件处理函数唤醒，之后会返回0。
+         */
 		if (!timeo || !inet_wait_for_connect(sk, timeo, writebias))
 			goto out;
 
 		err = sock_intr_errno(timeo);
+		/* 进程收到信号，如果err为-ERESTARTSYS，接下来库函数会重新调用connect() */
 		if (signal_pending(current))
 			goto out;
 	}
@@ -661,7 +725,7 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	/* Connection was closed by RST, timeout, ICMP error
 	 * or another process disconnected us.
 	 */
-	if (sk->sk_state == TCP_CLOSE) //在前面的sk->sk_prot->connect过程中，这个状态会根据实际情况变化
+	if (sk->sk_state == TCP_CLOSE)
 		goto sock_error;
 
 	/* sk->sk_err may be not zero now, if RECVERR was ordered by user
@@ -669,7 +733,9 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	 * Hence, it is handled normally after connect() return successfully.
 	 */
 
+	/* 更新socket状态为连接已建立 */
 	sock->state = SS_CONNECTED;
+	/* 清除错误码 */
 	err = 0;
 out:
 	return err;
@@ -677,7 +743,9 @@ out:
 sock_error:
 	err = sock_error(sk) ? : -ECONNABORTED;
 	sock->state = SS_UNCONNECTED;
+	 /* 如果使用的是TCP，则sk_prot为tcp_prot，disconnect为tcp_disconnect() */
 	if (sk->sk_prot->disconnect(sk, flags))
+		/* 如果失败 */
 		sock->state = SS_DISCONNECTING;
 	goto out;
 }
@@ -713,6 +781,7 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 	if (!sk2)
 		goto do_err;
 
+	/* RPS补丁 */
 	lock_sock(sk2);
 
 	sock_rps_record_flow(sk2);
@@ -725,6 +794,7 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 	 */
 	sock_graft(sk2, newsock);
 
+	/* 把新socket的状态设为已连接 */
 	newsock->state = SS_CONNECTED;
 	err = 0;
 	release_sock(sk2);
@@ -745,17 +815,20 @@ int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 	DECLARE_SOCKADDR(struct sockaddr_in *, sin, uaddr);
 
 	sin->sin_family = AF_INET;
+	/* 如果是getpeername，要求连接已经建立 */
 	if (peer) {
 		if (!inet->inet_dport ||
 		    (((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_SYN_SENT)) &&
 		     peer == 1))
 			return -ENOTCONN;
+		/* 获取对端端口、IP */
 		sin->sin_port = inet->inet_dport;
 		sin->sin_addr.s_addr = inet->inet_daddr;
 	} else {
 		__be32 addr = inet->inet_rcv_saddr;
 		if (!addr)
 			addr = inet->inet_saddr;
+		/* 获取本端端口、IP */
 		sin->sin_port = inet->inet_sport;
 		sin->sin_addr.s_addr = addr;
 	}
@@ -774,6 +847,7 @@ int inet_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 
 	/* We may need to bind the socket. */
 	if (!inet_sk(sk)->inet_num && !sk->sk_prot->no_autobind &&
+		/* 如果没调用bind(), 则自动绑定一个可用端口 */
 	    inet_autobind(sk))
 		return -EAGAIN;
 
@@ -1883,7 +1957,7 @@ static struct packet_type ip_packet_type __read_mostly = {
 	/*
 	 *	Tell SOCKET that we are alive...注册socket，告诉socket inet类型的地址族已经准备好了
 	 */
-
+	/* 注册Internet协议簇的相关信息 */
 	(void)sock_register(&inet_family_ops);
 
 #ifdef CONFIG_SYSCTL
@@ -1910,6 +1984,7 @@ static struct packet_type ip_packet_type __read_mostly = {
 #endif
 
 	/* Register the socket-side information for inet_create. */
+	/* 将inetsw_array中元素加入到inetsw链表中 */
 	for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
 		INIT_LIST_HEAD(r);
 
@@ -1919,13 +1994,14 @@ static struct packet_type ip_packet_type __read_mostly = {
 	/*
 	 *	Set the ARP module up
 	 */
-
+	/* ARP协议初始化 */
 	arp_init();
 
 	/*
 	 *	Set the IP module up
 	 */
 
+	/* IP协议初始化 */
 	ip_init();
 
 	tcp_v4_init();

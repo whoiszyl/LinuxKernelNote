@@ -451,11 +451,18 @@ int __alloc_fd(struct files_struct *files,
 
 	spin_lock(&files->file_lock);
 repeat:
+	/* 获取当前进程的ftd指针变量 */
 	fdt = files_fdtable(files);
+	/* 从start位置开始搜索，针对get_unused_fd_flags，start值为0 */
 	fd = start;
+	/* 判断是否需要调整fd的值，因在当前进程描述符中，其files->next_fd即为下一个申请的fd值 */
 	if (fd < files->next_fd)
 		fd = files->next_fd;
 
+	/* 
+	 * 判断要申请的fd值是否小于当前进程支持的最大进程数，
+	 * 若小于则，则调用 find_next_zero_bit，查找第一个位数为0位对应的index值。
+	 */
 	if (fd < fdt->max_fds)
 		fd = find_next_zero_bit(fdt->open_fds, fdt->max_fds, fd);
 
@@ -463,10 +470,11 @@ repeat:
 	 * N.B. For clone tasks sharing a files structure, this test
 	 * will limit the total number of files that can be opened.
 	 */
+	 /* 当fd的值大于最大可打开的文件序号时，返回错误 */
 	error = -EMFILE;
 	if (fd >= end)
 		goto out;
-
+	/* 调用expand_files，确认是否需要扩展struct fdtable *fdt指针变量的容量，下面会详细说明 */
 	error = expand_files(files, fd);
 	if (error < 0)
 		goto out;
@@ -478,10 +486,13 @@ repeat:
 	if (error)
 		goto repeat;
 
+	/* 重新设置files->next_fd，该变量即下一个可用的fd的值，对于fd的值的使用，是递增使用的 */
 	if (start <= files->next_fd)
 		files->next_fd = fd + 1;
 
+	/* 将fdt->open_fds中的第fd位置为1，表示该fd已被使用。*/
 	__set_open_fd(fd, fdt);
+	/* 根据是否设置O_CLOEXEC */
 	if (flags & O_CLOEXEC)
 		__set_close_on_exec(fd, fdt);
 	else
@@ -507,6 +518,7 @@ static int alloc_fd(unsigned start, unsigned flags)
 
 int get_unused_fd_flags(unsigned flags)
 {
+	/* 其中rlimit(RLIMIT_NOFILE)用于获取linux内核中所有进程可打开的最大文件数 */
 	return __alloc_fd(current->files, 0, rlimit(RLIMIT_NOFILE), flags);
 }
 EXPORT_SYMBOL(get_unused_fd_flags);
@@ -677,15 +689,19 @@ EXPORT_SYMBOL(fget_raw);
  */
 static unsigned long __fget_light(unsigned int fd, fmode_t mask)
 {
+	/* 获取当前进程打开的文件列表 */
 	struct files_struct *files = current->files;
 	struct file *file;
 
+	/* 如果只有一个进程在使用，那就不需要加锁了，锁比较耗性能 */
 	if (atomic_read(&files->count) == 1) {
+		/* 根据files_struct结构获取file结构体 */
 		file = __fcheck_files(files, fd);
 		if (!file || unlikely(file->f_mode & mask))
 			return 0;
 		return (unsigned long)file;
 	} else {
+		/* 多个进程使用，需要加锁保护 */
 		file = __fget(fd, mask);
 		if (!file)
 			return 0;

@@ -43,33 +43,47 @@ int reqsk_queue_alloc(struct request_sock_queue *queue,
 	size_t lopt_size = sizeof(struct listen_sock);
 	struct listen_sock *lopt = NULL;
 
+	
+	/* nr_table_entries必需在[8, sysctl_max_syn_backlog]之间，默认是[8, 256] 
+	 * 但实际上在sys_listen()中要求backlog <= sysctl_somaxconn（默认为128）
+	 * 所以此时默认区间为[8, 128]
+	 */
 	nr_table_entries = min_t(u32, nr_table_entries, sysctl_max_syn_backlog);
 	nr_table_entries = max_t(u32, nr_table_entries, 8);
+	/* 使nr_table_entries = 2^n，向上取整 */
 	nr_table_entries = roundup_pow_of_two(nr_table_entries + 1);
+	/* 增加一个指针数组的长度 */
 	lopt_size += nr_table_entries * sizeof(struct request_sock *);
 
 	if (lopt_size <= (PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER))
+		/* 申请内存在1页内，则申请物理地址连续的空间 */
 		lopt = kzalloc(lopt_size, GFP_KERNEL |
 					  __GFP_NOWARN |
 					  __GFP_NORETRY);
 	if (!lopt)
+		/* 如果申请内存大于1页，则申请虚拟地址连续的空间 */
 		lopt = vzalloc(lopt_size);
 	if (!lopt)
 		return -ENOMEM;
 
+	 /* 获取一个随机数 */
 	get_random_bytes(&lopt->hash_rnd, sizeof(lopt->hash_rnd));
 	rwlock_init(&queue->syn_wait_lock);
+	/* 全连接队列置为空 */
 	queue->rskq_accept_head = NULL;
+	/* 半连接队列的最大长度 */
 	lopt->nr_table_entries = nr_table_entries;
 	lopt->max_qlen_log = ilog2(nr_table_entries);
 
 	write_lock_bh(&queue->syn_wait_lock);
+	/* 初始化半连接队列 */
 	queue->listen_opt = lopt;
 	write_unlock_bh(&queue->syn_wait_lock);
 
 	return 0;
 }
 
+/* 销毁连接请求块中的listen_sock实例，释放半连接队列 */
 void __reqsk_queue_destroy(struct request_sock_queue *queue)
 {
 	/* This is an error recovery path only, no locking needed */

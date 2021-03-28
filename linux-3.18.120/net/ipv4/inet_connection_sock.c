@@ -45,10 +45,12 @@ void inet_get_local_port_range(struct net *net, int *low, int *high)
 }
 EXPORT_SYMBOL(inet_get_local_port_range);
 
+/* 用于判断绑定端口是否冲突 */
 int inet_csk_bind_conflict(const struct sock *sk,
 			   const struct inet_bind_bucket *tb, bool relax)
 {
 	struct sock *sk2;
+	/* SO_REUSEADDR，表示处于TIME_WAIT状态的端口允许重用 */
 	int reuse = sk->sk_reuse;
 	int reuseport = sk->sk_reuseport;
 	kuid_t uid = sock_i_uid((struct sock *)sk);
@@ -60,12 +62,20 @@ int inet_csk_bind_conflict(const struct sock *sk,
 	 * one this bucket belongs to.
 	 */
 
+	/* 遍历此端口上的sock */
 	sk_for_each_bound(sk2, &tb->owners) {
+		/* 冲突的条件1：不是同一socket、绑定在相同的设备上 */
 		if (sk != sk2 &&
 		    !inet_v6_ipv6only(sk2) &&
 		    (!sk->sk_bound_dev_if ||
 		     !sk2->sk_bound_dev_if ||
 		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if)) {
+		    /* 冲突的条件2：绑定在相同的IP上
+             * 冲突的条件3（符合一个即满足）：
+             * 3.1 本socket不允许重用
+             * 3.2 链表中的socket不允许重用
+             * 3.3 链表中的socket处于监听状态
+             */
 			if ((!reuse || !sk2->sk_reuse ||
 			    sk2->sk_state == TCP_LISTEN) &&
 			    (!reuseport || !sk2->sk_reuseport ||
@@ -99,6 +109,7 @@ EXPORT_SYMBOL_GPL(inet_csk_bind_conflict);
  */
 int inet_csk_get_port(struct sock *sk, unsigned short snum)
 {
+	/* 指向tcp_hashinfo */	
 	struct inet_hashinfo *hashinfo = sk->sk_prot->h.hashinfo;
 	struct inet_bind_hashbucket *head;
 	struct inet_bind_bucket *tb;
@@ -148,12 +159,18 @@ again:
 		 * 重新开始循环
 		 */
 		do {
+			 /* 查看端口是否属于保留的 */
 			if (inet_is_local_reserved_port(net, rover))
+				/* rover加1，继续 */
 				goto next_nolock;
+			/* 根据端口号，确定所在的哈希桶 */
 			head = &hashinfo->bhash[inet_bhashfn(net, rover,
 					hashinfo->bhash_size)];
+			/* 锁住哈希桶 */
 			spin_lock(&head->lock);
+			/* 从头遍历哈希桶 */
 			inet_bind_bucket_for_each(tb, &head->chain)
+				/* 如果端口被使用了 */
 				if (net_eq(ib_net(tb), net) && tb->port == rover) {
 					if (((tb->fastreuse > 0 &&
 					      sk->sk_reuse &&
@@ -162,7 +179,9 @@ again:
 					      sk->sk_reuseport &&
 					      uid_eq(tb->fastuid, uid))) &&
 					    (tb->num_owners < smallest_size || smallest_size == -1)) {
+					    /* 记下这个端口使用者的个数 */
 						smallest_size = tb->num_owners;
+						 /* 记下这个端口 */
 						smallest_rover = rover;
 						/*
 						 * 如果已绑定的端口号数量已经大于区间
@@ -173,16 +192,20 @@ again:
 						 */
 						if (atomic_read(&hashinfo->bsockets) > (high - low) + 1 &&
 						    !inet_csk(sk)->icsk_af_ops->bind_conflict(sk, tb, false)) {
+							/* 没有冲突，使用此端口 */
 							snum = smallest_rover;
 							goto tb_found;
 						}
 					}
+					/* 检查是否有端口绑定冲突，该端口是否能重用 */
 					if (!inet_csk(sk)->icsk_af_ops->bind_conflict(sk, tb, false)) {
 						snum = rover;
 						goto tb_found;
 					}
+					/* 此端口不可重用，看下一个 */
 					goto next;
 				}
+			/* 找到了没被用的端口，退出 */
 			break;
 		next:
 			spin_unlock(&head->lock);
@@ -198,6 +221,7 @@ again:
 		 * the top level, not from the 'break;' statement.
 		 */
 		ret = 1;
+		/* 完全遍历 */
 		if (remaining <= 0) {
 			if (smallest_size != -1) {
 				snum = smallest_rover;
@@ -208,8 +232,10 @@ again:
 		/* OK, here is the one we will use.  HEAD is
 		 * non-NULL and we hold it's mutex.
 		 */
+		/* 自动选择的可用端口 */
 		snum = rover;
 	} else {
+		/* 如果有指定要绑定的端口 */
 have_snum:
         /*
              * 如果是指定端口号，则需要在已绑定的信息
@@ -225,12 +251,15 @@ have_snum:
 		spin_lock(&head->lock);
 		inet_bind_bucket_for_each(tb, &head->chain)
 			if (net_eq(ib_net(tb), net) && tb->port == snum)
+				/* 发现端口在用 */
 				goto tb_found;
 	}
 	tb = NULL;
 	goto tb_not_found;
 tb_found:
+	/* 端口上有绑定sock时 */
 	if (!hlist_empty(&tb->owners)) {
+		/* 这是强制的绑定啊，不管端口是否会绑定冲突！*/
 		if (sk->sk_reuse == SK_FORCE_REUSE)
 			goto success;
 
@@ -239,10 +268,14 @@ tb_found:
 		     (tb->fastreuseport > 0 &&
 		      sk->sk_reuseport && uid_eq(tb->fastuid, uid))) &&
 		    smallest_size == -1) {
+		    /* 指定端口的情况 */
 			goto success;
 		} else {
 			ret = 1;
 			if (inet_csk(sk)->icsk_af_ops->bind_conflict(sk, tb, true)) {
+                /* 自动分配的端口绑定冲突了，再次尝试，最多重试5次。 
+                 * 我觉得以下if不必要，因为自动选择时goto tb_found之前都有检测过了。
+                 */
 				if (((sk->sk_reuse && sk->sk_state != TCP_LISTEN) ||
 				     (tb->fastreuseport > 0 &&
 				      sk->sk_reuseport && uid_eq(tb->fastuid, uid))) &&
@@ -250,13 +283,14 @@ tb_found:
 					spin_unlock(&head->lock);
 					goto again;
 				}
-
+				/* 失败 */
 				goto fail_unlock;
 			}
 		}
 	}
 tb_not_found:
 	ret = 1;
+	 /* 申请和初始化一个inet_bind_bucket结构 */
 	if (!tb && (tb = inet_bind_bucket_create(hashinfo->bind_bucket_cachep,
 					net, head, snum)) == NULL)
 		goto fail_unlock;
@@ -279,6 +313,7 @@ tb_not_found:
 			tb->fastreuseport = 0;
 	}
 success:
+	/* 赋值icsk中的inet_bind_bucket */
 	if (!inet_csk(sk)->icsk_bind_hash)
 		inet_bind_hash(sk, tb, snum);
 	WARN_ON(inet_csk(sk)->icsk_bind_hash != tb);
@@ -302,6 +337,7 @@ EXPORT_SYMBOL_GPL(inet_csk_get_port);
 static int inet_csk_wait_for_connect(struct sock *sk, long timeo)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
+	/* 初始化等待任务 */
 	DEFINE_WAIT(wait);
 	int err;
 
@@ -320,22 +356,36 @@ static int inet_csk_wait_for_connect(struct sock *sk, long timeo)
 	 * having to remove and re-insert us on the wait queue.
 	 */
 	for (;;) {
+		/* 把等待任务加入到socket的等待队列中，把进程状态设置为TASK_INTERRUPTIBLE */
 		prepare_to_wait_exclusive(sk_sleep(sk), &wait,
 					  TASK_INTERRUPTIBLE);
+		/* 等下可能要睡觉了，先释放 */
 		release_sock(sk);
+		/* 如果全连接队列为空 */
 		if (reqsk_queue_empty(&icsk->icsk_accept_queue))
+			/* 进入睡眠，直到超时或收到信号 */
 			timeo = schedule_timeout(timeo);
+		/* 醒来后重新上锁 */
 		lock_sock(sk);
 		err = 0;
+		/* 全连接队列不为空时，退出 */
 		if (!reqsk_queue_empty(&icsk->icsk_accept_queue))
 			break;
 		err = -EINVAL;
+		/* 如果sock不处于监听状态了，退出 */
 		if (sk->sk_state != TCP_LISTEN)
 			break;
 		err = sock_intr_errno(timeo);
+		
+        /* 
+         * 如果进程有待处理的信号，退出。
+         * 因为timeo默认为MAX_SCHEDULE_TIMEOUT，所以err默认为-ERESTARTSYS。
+         * 接下来会重新调用此函数，所以accept()依然阻塞。
+         */
 		if (signal_pending(current))
 			break;
 		err = -EAGAIN;
+		/* 如果等待超时，即超过用户设置的sk->sk_rcvtimeo，退出 */
 		if (!timeo)
 			break;
 	}
@@ -391,9 +441,11 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err)
 
 		/* If this is a non blocking socket don't sleep */
 		error = -EAGAIN;
+		/* 如果是非阻塞的，则直接退出 */
 		if (!timeo)
 			goto out_err;
 
+		/* 阻塞等待，直到有全连接。如果用户有设置等待超时时间，超时后会退出 */
 		error = inet_csk_wait_for_connect(sk, timeo);
 		if (error)
 			goto out_err;
@@ -403,8 +455,10 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err)
      * 将新的子传输控制块取出
      */
 	req = reqsk_queue_remove(queue);
+	/* 获取新连接的sock，释放连接控制块 */
 	newsk = req->sk;
 
+	/* 当前backlog队列的全连接数减一 */
 	sk_acceptq_removed(sk);
 	if (sk->sk_protocol == IPPROTO_TCP && queue->fastopenq != NULL) {
 		spin_lock_bh(&queue->fastopenq->lock);
@@ -629,12 +683,17 @@ static inline void syn_ack_recalc(struct request_sock *req, const int thresh,
 				  const u8 rskq_defer_accept,
 				  int *expire, int *resend)
 {
+	/* 没有开启defer_accept， 也就是说不需要等数据包 */
 	if (!rskq_defer_accept) {
+		/* 使用synack的重传次数来判断，是否超时 */
 		*expire = req->num_timeout >= thresh;
+		/* 需要重传 */
 		*resend = 1;
 		return;
 	}
+	/* 对与defer_accept如果收到ack了，但未达到最大重传次数，则*expire=0，不重传synack */
 	*expire = req->num_timeout >= thresh &&
+			/* 未收到ack过，超过最大重传次数 */
 		  (!inet_rsk(req)->acked || req->num_timeout >= max_retries);
 	/*
 	 * Do not resend while waiting for data after ACK,
@@ -642,6 +701,7 @@ static inline void syn_ack_recalc(struct request_sock *req, const int thresh,
 	 * last chance for data or ACK to create established socket.
 	 */
 	*resend = !inet_rsk(req)->acked ||
+		 /* 被ack了,但是一直没收到数据，在defer_accept的最后一次重传中重传synack */
 		  req->num_timeout >= rskq_defer_accept - 1;
 }
 
@@ -787,7 +847,12 @@ void inet_csk_reqsk_queue_prune(struct sock *parent,
 				syn_ack_recalc(req, thresh, max_retries,
 					       queue->rskq_defer_accept,
 					       &expire, &resend);
+				/* tcp_syn_ack_timeout */
 				req->rsk_ops->syn_ack_timeout(parent, req);
+				/* 
+				 * 没有超过最大重传次数； 对于defer_accept来说，如果收到ack了，
+				 * 但是一直没有收到数据 , 不需要重传
+				 */
 				if (!expire &&
 				    (!resend ||
 				     !inet_rtx_syn_ack(parent, req) ||

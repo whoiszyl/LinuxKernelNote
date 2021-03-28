@@ -217,6 +217,7 @@ int udp_lib_get_port(struct sock *sk, unsigned short snum,
 	int    error = 1;
 	struct net *net = sock_net(sk);
 
+	/* sendto的时候自动bind， 查找一个可用端口 */
 	if (!snum) {
 		int low, high, remaining;
 		unsigned int rand;
@@ -259,21 +260,27 @@ int udp_lib_get_port(struct sock *sk, unsigned short snum,
 	} else {
 		hslot = udp_hashslot(udptable, net, snum);
 		spin_lock_bh(&hslot->lock);
+		/* 超过10个要检查hash2 */
 		if (hslot->count > 10) {
 			int exist;
+			/* udp_portaddr_hash之前只对inet_rcv_saddr做过hash */
 			unsigned int slot2 = udp_sk(sk)->udp_portaddr_hash ^ snum;
 
 			slot2          &= udptable->mask;
 			hash2_nulladdr &= udptable->mask;
 
 			hslot2 = udp_hashslot2(udptable, slot2);
+			/* 检查较短的那个hash链表 */
 			if (hslot->count < hslot2->count)
 				goto scan_primary_hash;
 
+			/* 判断hash2是否有该端口正在被使用 */
 			exist = udp_lib_lport_inuse2(net, snum, hslot2,
 						     sk, saddr_comp);
+			/* 再判断通配地址的情况 */
 			if (!exist && (hash2_nulladdr != slot2)) {
 				hslot2 = udp_hashslot2(udptable, hash2_nulladdr);
+				/* 再判断通配地址的情况 */
 				exist = udp_lib_lport_inuse2(net, snum, hslot2,
 							     sk, saddr_comp);
 			}
@@ -290,12 +297,16 @@ scan_primary_hash:
 found:
 	inet_sk(sk)->inet_num = snum;
 	udp_sk(sk)->udp_port_hash = snum;
+	/* 地址+端口 hash */
 	udp_sk(sk)->udp_portaddr_hash ^= snum;
+	/* 未添加过hash表中 */
 	if (sk_unhashed(sk)) {
+		/* 根据net+端口的hash，添加到hash1 */
 		sk_nulls_add_node_rcu(sk, &hslot->head);
 		hslot->count++;
 		sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
 
+		/* 根据地址+端口hash，添加到hash2 */
 		hslot2 = udp_hashslot2(udptable, udp_sk(sk)->udp_portaddr_hash);
 		spin_lock(&hslot2->lock);
 		hlist_nulls_add_head_rcu(&udp_sk(sk)->udp_portaddr_node,
@@ -491,13 +502,16 @@ struct sock *__udp4_lib_lookup(struct net *net, __be32 saddr,
 	u32 hash = 0;
 
 	rcu_read_lock();
+	/* 超过10个， 在hash2中查找 */
 	if (hslot->count > 10) {
 		hash2 = udp4_portaddr_hash(net, daddr, hnum);
 		slot2 = hash2 & udptable->mask;
 		hslot2 = &udptable->hash2[slot2];
+		/* 哪个链表短查哪个 */
 		if (hslot->count < hslot2->count)
 			goto begin;
 
+		/* 跟begin相同的逻辑 */
 		result = udp4_lib_lookup2(net, saddr, sport,
 					  daddr, hnum, dif,
 					  hslot2, slot2);
@@ -988,10 +1002,12 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	}
 	/* 没有指定选项，则使用套接口结构中的选项，它是用IP_OPTIONS套接口选项设置的 */
 	if (!ipc.opt) {
+		/* 如果发送数据中的控制信息中没有IP选项信息，则尝试从inet_sock结构中获取 */
 		struct ip_options_rcu *inet_opt;
 
 		rcu_read_lock();
 		inet_opt = rcu_dereference(inet->inet_opt);
+		/* 如果setsockopt设置了ip选项 */
 		if (inet_opt) {
 			memcpy(&opt_copy, inet_opt,
 			       sizeof(*inet_opt) + inet_opt->opt.optlen);
@@ -1001,16 +1017,18 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	}
 
 	saddr = ipc.addr;
+	/* 控制信息改成目的地址 */
 	ipc.addr = faddr = daddr;
 
-	/* 指定了选路信息 */
+	/* 设置了源路由 */
 	if (ipc.opt && ipc.opt->opt.srr) {
 		if (!daddr) {
 			err = -EINVAL;
 			goto out_free;
 		}
-		/* 目的地址应当是第一个源路由 */
+		/* 需要使用ip选项中的下一跳作为目的地址 */
 		faddr = ipc.opt->opt.faddr;
+		/* 因为重新选择路由，清除connected */
 		connected = 0;
 	}
 	tos = get_rttos(&ipc, inet);
@@ -1019,7 +1037,9 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	    (msg->msg_flags & MSG_DONTROUTE) ||
 	    /* 或者设置了严格源站选路 */
 	    (ipc.opt && ipc.opt->opt.is_strictroute)) {
-	    /* 此标志表示下一站必定位于本地子网 */
+	    /* 此时目的地址和下一跳必然在本地网络，
+	     * 设置RTO_ONLINK表示后续查找时与目的地址直连，而不用通过gateway 
+	     */
 		tos |= RTO_ONLINK;
 		connected = 0;
 	}
@@ -1081,20 +1101,28 @@ back_from_confirm:
 
 	/* 从路由中获取源地址和目的地址 */
 	saddr = fl4->saddr;
+	/* 
+	 *如果选项中更没有指定目的地址，从路由中获取. 比如发送的时候没有指定目的地址，
+	 * 而在控制信息中提供严格或者宽松的源路由 
+	 */
 	if (!ipc.addr)
 		daddr = ipc.addr = fl4->daddr;
 
 	/* Lockless fast path for the non-corking case. */
+	/* 不用cork的话不需要加锁，只是创建一个skb发出去就可以了， 由ip层执行分片 */
 	if (!corkreq) {
+		/* 创建好skb，并设置ip头 */
 		skb = ip_make_skb(sk, fl4, getfrag, msg->msg_iov, ulen,
 				  sizeof(struct udphdr), &ipc, &rt,
 				  msg->msg_flags);
 		err = PTR_ERR(skb);
 		if (!IS_ERR_OR_NULL(skb))
+			/* 直接发送 */
 			err = udp_send_skb(skb, fl4);
 		goto out;
 	}
 
+	/* 需要cork数据了，需要加锁 */
 	lock_sock(sk);
 	if (unlikely(up->pending)) {
 		/* 还处于上次的发送过程中，这不应该，因为前面已经判断过了 */
@@ -1130,11 +1158,14 @@ do_append_data:
 			     corkreq ? msg->msg_flags|MSG_MORE : msg->msg_flags);
 	/* 添加报文错误，则将缓存中的数据发送出去 */
 	if (err)
+		/* 出错就清空数据，和pending标记， 因为udp不保证可靠性 */
 		udp_flush_pending_frames(sk);
 	/* 没有后续数据或者IP选项不缓存数据，则调用udp_push_pending_frames发送数据 */
 	else if (!corkreq)
+		/* 直接发送所有数据 */
 		err = udp_push_pending_frames(sk);
 	else if (unlikely(skb_queue_empty(&sk->sk_write_queue)))
+		/* 没有数据等待发送，则清空pendind */
 		up->pending = 0;
 	release_sock(sk);
 
@@ -1145,6 +1176,7 @@ out_free:
 	if (free)
 		kfree(ipc.opt);
 	if (!err)
+		/* 发送成功，返回发送的字节数 */
 		return len;
 	/*
 	 * ENOBUFS = no kernel mem, SOCK_NOSPACE = no sndbuf space.  Reporting
@@ -1157,6 +1189,7 @@ out_free:
 		UDP_INC_STATS_USER(sock_net(sk),
 				UDP_MIB_SNDBUFERRORS, is_udplite);
 	}
+	/* 发送失败，返回错误码 */
 	return err;
 /* 发送数据时设置了MSG_CONFIRM标志 */
 do_confirm:
@@ -1319,6 +1352,7 @@ int udp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	bool slow;
 
 	if (flags & MSG_ERRQUEUE)
+		/* 返回sk_error_queue队列中的数据 */
 		return ip_recv_error(sk, msg, len, addr_len);
 
 try_again:
@@ -1733,6 +1767,7 @@ start_lookup:
 
 	spin_lock(&hslot->lock);
 	sk_nulls_for_each_entry_offset(sk, node, &hslot->head, offset) {
+		/* 检查sk是否满足接收条件，并判断组播是否允许通过 */
 		if (__udp_is_mcast_sock(net, sk,
 					uh->dest, daddr,
 					uh->source, saddr,
@@ -1749,6 +1784,7 @@ start_lookup:
 	spin_unlock(&hslot->lock);
 
 	/* Also lookup *:port if we are using hash2 and haven't done so yet. */
+	/* 再遍历INADDR_ANY的情况 */
 	if (use_hash2 && hash2 != hash2_any) {
 		hash2 = hash2_any;
 		goto start_lookup;
@@ -1828,6 +1864,12 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		uh = udp_hdr(skb);
 	}
 
+	/*
+	 * UDP只提供有限的校验能力，如果不计算，则发送时为全0  
+	 * 校验和初始化，若udp头部的校验和字段为0，则设置不必校验标志位，若校验由硬
+     * 完成，且伪首部通过校验，则同样设置不必校验标志，若以上都不满足，则将伪首
+     * 部的校验和给skb->csum，之后还需要对数据部分进行校验
+     */
 	if (udp4_csum_init(skb, uh, proto))
 		goto csum_error;
 
@@ -1849,9 +1891,11 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		return 0;
 	} else {
 		if (rt->rt_flags & (RTCF_BROADCAST|RTCF_MULTICAST))
+			/* 组播和广播处理，所有满足条件的sk都能接收 */
 			return __udp4_lib_mcast_deliver(net, skb, uh,
 					saddr, daddr, udptable);
 
+		/* 在hash表中查找满足条件的sk */
 		sk = __udp4_lib_lookup_skb(skb, uh->source, uh->dest, udptable);
 	}
 
@@ -1873,14 +1917,17 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		return 0;
 	}
 
+	/* 没有满足条件的sk */
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 		goto drop;
 	nf_reset(skb);
 
+	/* 对数据包进行校验和，如果校验失败则安静地丢弃 */
 	/* No socket. Drop packet silently, if checksum is wrong */
 	if (udp_lib_checksum_complete(skb))
 		goto csum_error;
 
+	/* 校验成功，发送端口不可达ICMP */
 	UDP_INC_STATS_BH(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
 	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
 

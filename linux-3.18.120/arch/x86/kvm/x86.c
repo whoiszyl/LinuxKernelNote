@@ -4656,11 +4656,13 @@ static int emulator_pio_in_out(struct kvm_vcpu *vcpu, int size,
 	vcpu->arch.pio.count  = count;
 	vcpu->arch.pio.size = size;
 
+	/* vcpu->arch.pio_data保存了实际out出来的数据 */
 	if (!kernel_pio(vcpu, vcpu->arch.pio_data)) {
 		vcpu->arch.pio.count = 0;
 		return 1;
 	}
 
+	/* vcpu->arch.pio_data就放在在kvm_run后面一个页的位置*/
 	vcpu->run->exit_reason = KVM_EXIT_IO;
 	vcpu->run->io.direction = in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
 	vcpu->run->io.size = size;
@@ -5459,6 +5461,7 @@ restart:
 }
 EXPORT_SYMBOL_GPL(x86_emulate_instruction);
 
+/* 首先读取guest的rax，这个值放的是向端口写入的数据 */
 int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size, unsigned short port)
 {
 	unsigned long val = kvm_register_read(vcpu, VCPU_REGS_RAX);
@@ -5746,7 +5749,7 @@ static struct notifier_block pvclock_gtod_notifier = {
 	.notifier_call = pvclock_gtod_notify,
 };
 #endif
-
+//架构相关初始化
 int kvm_arch_init(void *opaque)
 {
 	int r;
@@ -5758,11 +5761,13 @@ int kvm_arch_init(void *opaque)
 		goto out;
 	}
 
+	//CPU是否支持kvm
 	if (!ops->cpu_has_kvm_support()) {
 		printk(KERN_ERR "kvm: no hardware support\n");
 		r = -EOPNOTSUPP;
 		goto out;
 	}
+	// bios是否禁用vt
 	if (ops->disabled_by_bios()) {
 		printk(KERN_ERR "kvm: disabled by bios\n");
 		r = -EOPNOTSUPP;
@@ -5770,23 +5775,27 @@ int kvm_arch_init(void *opaque)
 	}
 
 	r = -ENOMEM;
+	// kvm_shared_msrs
 	shared_msrs = alloc_percpu(struct kvm_shared_msrs);
 	if (!shared_msrs) {
 		printk(KERN_ERR "kvm: failed to allocate percpu kvm_shared_msrs\n");
 		goto out;
 	}
 
+	// mmu模块初始化
 	r = kvm_mmu_module_init();
 	if (r)
 		goto out_free_percpu;
 
 	kvm_set_mmio_spte_mask();
-
+	//给全局kvm_x86_ops赋值
 	kvm_x86_ops = ops;
 
+	//// 设置MMU的shadow PTE masks
 	kvm_mmu_set_mask_ptes(PT_USER_MASK, PT_ACCESSED_MASK,
 			PT_DIRTY_MASK, PT64_NX_MASK, 0);
 
+	//时钟初始化
 	kvm_timer_init();
 
 	perf_register_guest_info_callbacks(&kvm_guest_cbs);
@@ -5794,6 +5803,7 @@ int kvm_arch_init(void *opaque)
 	if (cpu_has_xsave)
 		host_xcr0 = xgetbv(XCR_XFEATURE_ENABLED_MASK);
 
+	//lapic初始化
 	kvm_lapic_init();
 #ifdef CONFIG_X86_64
 	pvclock_gtod_register_notifier(&pvclock_gtod_notifier);
@@ -6176,22 +6186,30 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		vcpu->run->request_interrupt_window;
 	bool req_immediate_exit = false;
 
+	/*进入Guest模式前先处理相关挂起的请求*/
 	if (vcpu->requests) {
+		/* 卸载MMU */
 		if (kvm_check_request(KVM_REQ_MMU_RELOAD, vcpu))
 			kvm_mmu_unload(vcpu);
+		/* 定时器迁移 */
 		if (kvm_check_request(KVM_REQ_MIGRATE_TIMER, vcpu))
 			__kvm_migrate_timers(vcpu);
+		/* 主时钟更新 */
 		if (kvm_check_request(KVM_REQ_MASTERCLOCK_UPDATE, vcpu))
 			kvm_gen_update_masterclock(vcpu->kvm);
+		/* 全局时钟更新 */
 		if (kvm_check_request(KVM_REQ_GLOBAL_CLOCK_UPDATE, vcpu))
 			kvm_gen_kvmclock_update(vcpu);
+		/* 虚拟机时钟更新 */
 		if (kvm_check_request(KVM_REQ_CLOCK_UPDATE, vcpu)) {
 			r = kvm_guest_time_update(vcpu);
 			if (unlikely(r))
 				goto out;
 		}
+		/* 更新mmu */
 		if (kvm_check_request(KVM_REQ_MMU_SYNC, vcpu))
 			kvm_mmu_sync_roots(vcpu);
+		/* 刷新TLB */
 		if (kvm_check_request(KVM_REQ_TLB_FLUSH, vcpu))
 			kvm_vcpu_flush_tlb(vcpu);
 		if (kvm_check_request(KVM_REQ_REPORT_TPR_ACCESS, vcpu)) {
@@ -6228,6 +6246,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 			kvm_vcpu_reload_apic_access_page(vcpu);
 	}
 
+	/* 检查是否有事件请求 */
 	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win) {
 		kvm_apic_accept_events(vcpu);
 		if (vcpu->arch.mp_state == KVM_MP_STATE_INIT_RECEIVED) {
@@ -6235,9 +6254,15 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 			goto out;
 		}
 
+		/* 注入阻塞的事件，中断，异常和nmi等 */
 		if (inject_pending_event(vcpu, req_int_win) != 0)
 			req_immediate_exit = true;
 		/* enable NMI/IRQ window open exits if needed */
+		/*
+         * 使能NMI/IRQ window，参见Intel64 System Programming Guide 25.3节
+         * 当使能了interrupt-window exiting或NMI-window exiting(由VMCS中相关字段控制)，
+         * 表示在刚进入虚拟机后，就会立刻因为有pending或注入的中断导致VM-exit
+         */
 		else {
 			if (vcpu->arch.nmi_pending)
 				kvm_x86_ops->enable_nmi_window(vcpu);
@@ -6258,6 +6283,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		}
 	}
 
+	/* 装载MMU，待深入分析 */
 	r = kvm_mmu_reload(vcpu);
 	if (unlikely(r)) {
 		goto cancel_injection;
@@ -6265,6 +6291,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	preempt_disable();
 
+	/* 进入Guest前期准备，架构相关 */
 	kvm_x86_ops->prepare_guest_switch(vcpu);
 	if (vcpu->fpu_active)
 		kvm_load_guest_fpu(vcpu);
@@ -6279,6 +6306,10 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	local_irq_disable();
 
+    /* 
+     * 如果VCPU处于EXITING_GUEST_MODE或者vcpu->requests(?)或者需要调度或者
+     * 有挂起的信号，则放弃
+     */
 	if (vcpu->mode == EXITING_GUEST_MODE || vcpu->requests
 	    || need_resched() || signal_pending(current)) {
 		vcpu->mode = OUTSIDE_GUEST_MODE;
@@ -6292,11 +6323,14 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	kvm_load_guest_xcr0(vcpu);
 
+	/* req_immediate_exit在前面使能NMI/IRQ window失败时设置，此时需要立即退出，触发重新调度 */
 	if (req_immediate_exit)
 		smp_send_reschedule(vcpu->cpu);
 
+	/*  计算虚拟机的enter时间 */
 	kvm_guest_enter();
 
+	/* 调试相关 */
 	if (unlikely(vcpu->arch.switch_db_regs)) {
 		set_debugreg(0, 7);
 		set_debugreg(vcpu->arch.eff_db[0], 0);
@@ -6307,6 +6341,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	}
 
 	trace_kvm_entry(vcpu->vcpu_id);
+	/* 调用架构相关的run接口(vmx_vcpu_run)，进入Guest模式 */
 	kvm_x86_ops->run(vcpu);
 
 	/*
@@ -6315,6 +6350,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	 * can (a) read the correct value of the debug registers, (b) set
 	 * KVM_DEBUGREG_WONT_EXIT again.
 	 */
+	/* 此处开始，说明已经发生了VM-exit，退出了Guest模式 */
 	if (unlikely(vcpu->arch.switch_db_regs & KVM_DEBUGREG_WONT_EXIT)) {
 		int i;
 
@@ -6331,9 +6367,11 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	 * care about the messed up debug address registers. But if
 	 * we have some of them active, restore the old state.
 	 */
+	/* 记录Guest退出前的TSC时钟 */
 	if (hw_breakpoint_active())
 		hw_breakpoint_restore();
 
+	/* 设置模式 */
 	vcpu->arch.last_guest_tsc = kvm_x86_ops->read_l1_tsc(vcpu,
 							   native_read_tsc());
 
@@ -6355,6 +6393,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	 */
 	barrier();
 
+	/* 计算虚拟机的退出时间 */
 	kvm_guest_exit();
 
 	preempt_enable();
@@ -6363,6 +6402,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	/*
 	 * Profile KVM exit RIPs:
+	 * Profile(采样计数，用于性能分析和调优)相关
 	 */
 	if (unlikely(prof_on == KVM_PROFILING)) {
 		unsigned long rip = kvm_rip_read(vcpu);
@@ -6375,6 +6415,10 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	if (vcpu->arch.apic_attention)
 		kvm_lapic_sync_from_vapic(vcpu);
 
+	/* 
+     * 调用vmx_handle_exit()处理虚拟机异常，异常原因及其它关键信息
+     * 已经在之前获取。
+     */
 	r = kvm_x86_ops->handle_exit(vcpu);
 	return r;
 
@@ -6396,11 +6440,17 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 
 	r = 1;
 	while (r > 0) {
+		 /*检查状态*/
 		if (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
 		    !vcpu->arch.apf.halted)
+		    /* 进入Guest模式，最终通过VMLAUNCH指令实现*/
 			r = vcpu_enter_guest(vcpu);
 		else {
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
+			/* 阻塞VCPU，其实就是schddule()调度出去，
+			 * 但在有特殊情况时(比如有挂起的定时器或信号时)，
+			 * 不进行调度而直接退出
+			 */
 			kvm_vcpu_block(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
 			if (kvm_check_request(KVM_REQ_UNHALT, vcpu)) {
@@ -7013,6 +7063,7 @@ void kvm_arch_vcpu_free(struct kvm_vcpu *vcpu)
 	kvm_x86_ops->vcpu_free(vcpu);
 }
 
+/* 创建vcpu结构，架构相关，对于intel x86来说，最终调用vmx_create_vcpu */
 struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
 						unsigned int id)
 {
@@ -7033,21 +7084,29 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
 	return vcpu;
 }
 
+/*  设置VCPU结构 */
 int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu)
 {
 	int r;
 
 	vcpu->arch.mtrr_state.have_fixed = 1;
+	/* KVM虚拟机VCPU数据结构载入物理CPUv */
 	r = vcpu_load(vcpu);
 	if (r)
 		return r;
+	/* vcpu重置，包括相关寄存器、时钟、pmu等，最终调用vmx_vcpu_reset */
 	kvm_vcpu_reset(vcpu);
+	/*
+     * 进行虚拟机mmu相关设置，比如进行ept页表的相关初始工作或影子页表
+     * 相关的设置。
+     */
 	kvm_mmu_setup(vcpu);
 	vcpu_put(vcpu);
 
 	return r;
 }
 
+/* 架构相关的善后工作，比如再次调用vcpu_load，以及tsc相关处理 */
 int kvm_arch_vcpu_postcreate(struct kvm_vcpu *vcpu)
 {
 	int r;
@@ -7228,10 +7287,12 @@ int kvm_arch_hardware_setup(void)
 {
 	int r;
 
+	//CPU是否支持kvm
 	r = kvm_x86_ops->hardware_setup();
 	if (r != 0)
 		return r;
 
+	// 将msr保存到全局变量msrs_to_save[]数组
 	kvm_init_msr_list();
 	return 0;
 }

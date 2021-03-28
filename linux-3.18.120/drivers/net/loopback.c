@@ -74,11 +74,13 @@ static netdev_tx_t loopback_xmit(struct sk_buff *skb,
 	struct pcpu_lstats *lb_stats;
 	int len;
 
+	/* 调用协议特定的destructor，解绑sk */
 	skb_orphan(skb);
 
 	/* Before queueing this packet to netif_rx(),
 	 * make sure dst is refcounted.
 	 */
+	 /* 设置dst引用计数 */
 	skb_dst_force(skb);
 
 	skb->protocol = eth_type_trans(skb, dev);
@@ -87,6 +89,7 @@ static netdev_tx_t loopback_xmit(struct sk_buff *skb,
 	lb_stats = this_cpu_ptr(dev->lstats);
 
 	len = skb->len;
+	/*  调用netif_rx成功后更新统计 */
 	if (likely(netif_rx(skb) == NET_RX_SUCCESS)) {
 		u64_stats_update_begin(&lb_stats->syncp);
 		lb_stats->bytes += len;
@@ -166,11 +169,14 @@ static void loopback_setup(struct net_device *dev)
 	dev->hard_header_len	= ETH_HLEN;	/* 14	*/
 	dev->addr_len		= ETH_ALEN;	/* 6	*/
 	dev->tx_queue_len	= 0;
+	/* 设备类型 */
 	dev->type		= ARPHRD_LOOPBACK;	/* 0x0001*/
 	dev->flags		= IFF_LOOPBACK;
 	dev->priv_flags		|= IFF_LIVE_ADDR_CHANGE;
 	netif_keep_dst(dev);
+	/* gso */
 	dev->hw_features	= NETIF_F_ALL_TSO | NETIF_F_UFO;
+	/* 支持sg */
 	dev->features 		= NETIF_F_SG | NETIF_F_FRAGLIST
 		| NETIF_F_ALL_TSO
 		| NETIF_F_UFO
@@ -195,11 +201,14 @@ static __net_init int loopback_net_init(struct net *net)
 	int err;
 
 	err = -ENOMEM;
+	/* 分配net_device,并调用loopback_setup初始化 */
 	dev = alloc_netdev(0, "lo", NET_NAME_UNKNOWN, loopback_setup);
 	if (!dev)
 		goto out;
 
+	/* 关联 dev和net*/
 	dev_net_set(dev, net);
+	/* 注册 */
 	err = register_netdev(dev);
 	if (err)
 		goto out_free_netdev;

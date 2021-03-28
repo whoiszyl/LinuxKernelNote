@@ -48,6 +48,7 @@ int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 			saddr = inet->mc_addr;
 	}
 	fl4 = &inet->cork.fl.u.ip4;
+	/* 查找路由 */
 	rt = ip_route_connect(fl4, usin->sin_addr.s_addr, saddr,
 			      RT_CONN_FLAGS(sk), oif,
 			      sk->sk_protocol,
@@ -64,6 +65,7 @@ int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 		err = -EACCES;
 		goto out;
 	}
+	/* 更新源地址，如果更新后需要重新hash */
 	if (!inet->inet_saddr)
 		inet->inet_saddr = fl4->saddr;	/* Update source address */
 	if (!inet->inet_rcv_saddr) {
@@ -73,6 +75,7 @@ int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 	}
 	inet->inet_daddr = fl4->daddr;
 	inet->inet_dport = usin->sin_port;
+	/* 进入TCP_ESTABLISHED状态 */
 	sk->sk_state = TCP_ESTABLISHED;
 	inet_set_txhash(sk);
 	inet->inet_id = jiffies;

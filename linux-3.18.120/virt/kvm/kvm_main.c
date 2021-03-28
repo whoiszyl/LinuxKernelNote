@@ -457,25 +457,43 @@ static void kvm_init_memslots_id(struct kvm *kvm)
 static struct kvm *kvm_create_vm(unsigned long type)
 {
 	int r, i;
+	/* 
+     * 分配kvm结构体，一个虚拟机对应一个kvm结构，其中包括了虚拟机中的
+     * 关键系统，比如内存、中断、VCPU、总线等信息，该结构体也是kvm的关键结
+     * 构体之一
+     */
 	struct kvm *kvm = kvm_arch_alloc_vm();
 
 	if (!kvm)
 		return ERR_PTR(-ENOMEM);
-
+	
+	/* 初始化mmu_lock */
 	spin_lock_init(&kvm->mmu_lock);
+	/* 设置虚拟机的mm(mm_struct)为当前进程的mm */
 	atomic_inc(&current->mm->mm_count);
 	kvm->mm = current->mm;
 	kvm_eventfd_init(kvm);
+	/* 初始化事件通道 */
 	mutex_init(&kvm->lock);
 	mutex_init(&kvm->irq_lock);
 	mutex_init(&kvm->slots_lock);
 	atomic_set(&kvm->users_count, 1);
 	INIT_LIST_HEAD(&kvm->devices);
 
+	/* 初始化了KVM->arch，以及更新了kvmclock函数 */
 	r = kvm_arch_init_vm(kvm, type);
 	if (r)
 		goto out_err_no_disable;
 
+	/* 
+	 * 硬件使能，最终调用架构相关的kvm_x86_ops->hardware_enable()接口
+	 * hardware_enable，crash_enable_local_vmclear清理位图，
+	 * 判断MSR_IA32_FEATURE_CONTROL寄存器是否满足虚拟环境，
+	 * 不满足则将条件写入到寄存器内，CR4将X86_CR4_VMXE置位，
+	 * 另外还有kvm_cpu_vmxon打开VMX操作模式，
+	 * 外层包了vmm_exclusive的判断，它是kvm_intel.ko的外置参数，
+	 * 默认唯一，可以让用户强制不使用VMM硬件支持
+	 */
 	r = hardware_enable_all();
 	if (r)
 		goto out_err_no_disable;
@@ -490,6 +508,7 @@ static struct kvm *kvm_create_vm(unsigned long type)
 	BUILD_BUG_ON(KVM_MEM_SLOTS_NUM > SHRT_MAX);
 
 	r = -ENOMEM;
+	/* 分配memslots结构，并初始化为0 */
 	kvm->memslots = kvm_kvzalloc(sizeof(struct kvm_memslots));
 	if (!kvm->memslots)
 		goto out_err_no_srcu;
@@ -500,11 +519,13 @@ static struct kvm *kvm_create_vm(unsigned long type)
 	 */
 	kvm->memslots->generation = -150;
 
+	/* 初始化内存槽位(slot)的id信息，便于后续索引 */
 	kvm_init_memslots_id(kvm);
 	if (init_srcu_struct(&kvm->srcu))
 		goto out_err_no_srcu;
 	if (init_srcu_struct(&kvm->irq_srcu))
 		goto out_err_no_irq_srcu;
+	/* 初始化虚拟机的bus信息。*/
 	for (i = 0; i < KVM_NR_BUSES; i++) {
 		kvm->buses[i] = kzalloc(sizeof(struct kvm_io_bus),
 					GFP_KERNEL);
@@ -512,11 +533,13 @@ static struct kvm *kvm_create_vm(unsigned long type)
 			goto out_err;
 	}
 
+	/* 初始化mmu操作的通知链 */
 	r = kvm_init_mmu_notifier(kvm);
 	if (r)
 		goto out_err;
 
 	spin_lock(&kvm_lock);
+	/* 将新创建的虚拟机的kvm结构，加入到全局链表vm_list中 */
 	list_add(&kvm->vm_list, &vm_list);
 	spin_unlock(&kvm_lock);
 
@@ -768,6 +791,12 @@ static struct kvm_memslots *install_new_memslots(struct kvm *kvm,
  *
  * Must be called holding mmap_sem for write.
  */
+/*
+ * 建立guest物理地址空间中的内存区域与qemu-kvm虚拟地址空间中的内存区域的映射
+ * 相应信息由uerspace_memory_region参数传入，而其源头来自于用户态qemu-kvm。每次
+ * 调用设置一个内存区间。内存区域可以不连续(实际的物理内存区域也经常不连
+ * 续，因为有可能有保留内存)
+ */
 int __kvm_set_memory_region(struct kvm *kvm,
 			    struct kvm_userspace_memory_region *mem)
 {
@@ -779,12 +808,14 @@ int __kvm_set_memory_region(struct kvm *kvm,
 	struct kvm_memslots *slots = NULL, *old_memslots;
 	enum kvm_mr_change change;
 
+	/* 标记检查 */
 	r = check_memory_region_flags(mem);
 	if (r)
 		goto out;
 
 	r = -EINVAL;
 	/* General sanity checks */
+	/* 合规检查，防止用户态恶意传参，导致安全漏洞 */
 	if (mem->memory_size & (PAGE_SIZE - 1))
 		goto out;
 	if (mem->guest_phys_addr & (PAGE_SIZE - 1))
@@ -801,8 +832,11 @@ int __kvm_set_memory_region(struct kvm *kvm,
 	if (mem->guest_phys_addr + mem->memory_size < mem->guest_phys_addr)
 		goto out;
 
+	/* 将kvm_userspace_memory_region->slot转换为kvm_mem_slot结构，该结构从kvm->memslots获取 */
 	slot = id_to_memslot(kvm->memslots, mem->slot);
+	/* 内存区域起始位置在Guest物理地址空间中的页框号 */
 	base_gfn = mem->guest_phys_addr >> PAGE_SHIFT;
+	/* 内存区域大小转换为page单位 */
 	npages = mem->memory_size >> PAGE_SHIFT;
 
 	if (npages > KVM_MEM_MAX_NR_PAGES)
@@ -819,16 +853,26 @@ int __kvm_set_memory_region(struct kvm *kvm,
 	new.flags = mem->flags;
 
 	if (npages) {
+		/* 判断是否需新创建内存区域 */
 		if (!old.npages)
 			change = KVM_MR_CREATE;
+		/* 判断是否修改现有的内存区域 */
 		else { /* Modify an existing slot. */
+			/* 修改的区域的HVA不同或者大小不同或者flag中的 */
+			/* KVM_MEM_READONLY标记不同，直接退出 */
 			if ((mem->userspace_addr != old.userspace_addr) ||
 			    (npages != old.npages) ||
 			    ((new.flags ^ old.flags) & KVM_MEM_READONLY))
 				goto out;
 
+			/*
+			 * 走到这，说明被修改的区域HVA和大小都是相同的
+			 * 判断区域起始的GFN是否相同，如果是，则说明需
+			 * 要在Guest物理地址空间中move这段区域，设置KVM_MR_MOVE标记
+			 */
 			if (base_gfn != old.base_gfn)
 				change = KVM_MR_MOVE;
+			/* 如果仅仅是flag不同，则仅修改标记，设置KVM_MR_FLAGS_ONLY标记 */
 			else if (new.flags != old.flags)
 				change = KVM_MR_FLAGS_ONLY;
 			else { /* Nothing to change. */
@@ -836,14 +880,18 @@ int __kvm_set_memory_region(struct kvm *kvm,
 				goto out;
 			}
 		}
-	} else if (old.npages) {
+	} 
+	/*如果新设置的区域大小为0，而老的区域大小不为0，则表示需要删除原有区域。*/
+	else if (old.npages) {
 		change = KVM_MR_DELETE;
 	} else /* Modify a non-existent slot: disallowed. */
 		goto out;
 
+	/* 如果需要创建新区域 */
 	if ((change == KVM_MR_CREATE) || (change == KVM_MR_MOVE)) {
 		/* Check for overlaps */
 		r = -EEXIST;
+		/* 检查现有区域中是否重叠的 */
 		kvm_for_each_memslot(slot, kvm->memslots) {
 			if ((slot->id >= KVM_USER_MEM_SLOTS) ||
 			    (slot->id == mem->slot))
@@ -871,8 +919,9 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		if (kvm_create_dirty_bitmap(&new) < 0)
 			goto out_free;
 	}
-
+	/* 如果删除或move内存区域 */
 	if ((change == KVM_MR_DELETE) || (change == KVM_MR_MOVE)) {
+		/* 复制kvm->memslots的副本 */
 		slots = kvm_kvzalloc(sizeof(struct kvm_memslots));
 		if (!slots)
 			goto out_free;
@@ -881,9 +930,11 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		slot = id_to_memslot(slots, mem->slot);
 		slot->flags |= KVM_MEMSLOT_INVALID;
 
+		/* 安装新memslots，返回旧的memslots */
 		old_memslots = install_new_memslots(kvm, slots, NULL);
 
 		/* slot was deleted or moved, clear iommu mapping */
+		/*  原来的slot需要删除，所以需要unmap掉相应的内存区域 */
 		kvm_iommu_unmap_pages(kvm, &old);
 		/* From this point no new shadow pages pointing to a deleted,
 		 * or moved, memslot will be created.
@@ -892,10 +943,12 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		 * 	- gfn_to_hva (kvm_read_guest, gfn_to_pfn)
 		 * 	- kvm_is_visible_gfn (mmu_check_roots)
 		 */
+		 /* flush影子页表中的条目 */
 		kvm_arch_flush_shadow_memslot(kvm, slot);
 		slots = old_memslots;
 	}
 
+	/* 处理private memory slots，对其分配用户态地址，即HVA */
 	r = kvm_arch_prepare_memory_region(kvm, &new, mem, change);
 	if (r)
 		goto out_slots;
@@ -919,10 +972,12 @@ int __kvm_set_memory_region(struct kvm *kvm,
 		memset(&new.arch, 0, sizeof(new.arch));
 	}
 
+	/* 将new分配的memslot写入kvm->memslots[]数组中 */
 	old_memslots = install_new_memslots(kvm, slots, &new);
 
 	kvm_arch_commit_memory_region(kvm, mem, &old, change);
 
+	/* 释放旧内存区域相应的物理内存(HPA) */
 	kvm_free_physmem_slot(kvm, &old, &new);
 	kvfree(old_memslots);
 
@@ -1961,6 +2016,7 @@ static struct file_operations kvm_vcpu_fops = {
 /*
  * Allocates an inode for the vcpu.
  */
+ /* 为新创建的vcpu创建对应的fd，以便于后续通过该fd进行ioctl操作 */
 static int create_vcpu_fd(struct kvm_vcpu *vcpu)
 {
 	return anon_inode_getfd("kvm-vcpu", &kvm_vcpu_fops, vcpu, O_RDWR | O_CLOEXEC);
@@ -1969,6 +2025,7 @@ static int create_vcpu_fd(struct kvm_vcpu *vcpu)
 /*
  * Creates some virtual cpus.  Good luck creating more than one.
  */
+ /* 为虚拟机创建VCPU的ioctl调用的入口函数，本质为创建vcpu结构并初始化，并将其填入kvm结构中。 */
 static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, u32 id)
 {
 	int r;
@@ -1977,12 +2034,16 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, u32 id)
 	if (id >= KVM_MAX_VCPUS)
 		return -EINVAL;
 
+	/* 创建vcpu结构，架构相关，对于intel x86来说，最终调用vmx_create_vcpu */
 	vcpu = kvm_arch_vcpu_create(kvm, id);
 	if (IS_ERR(vcpu))
 		return PTR_ERR(vcpu);
 
 	preempt_notifier_init(&vcpu->preempt_notifier, &kvm_preempt_ops);
 
+	/* 
+	 * 设置vcpu结构，主要调用kvm_x86_ops->vcpu_load
+	 */
 	r = kvm_arch_vcpu_setup(vcpu);
 	if (r)
 		goto vcpu_destroy;
@@ -1997,27 +2058,39 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, u32 id)
 		goto unlock_vcpu_destroy;
 	}
 
+	/* 检测分配的vcpu id是否已经存在 */
 	kvm_for_each_vcpu(r, v, kvm)
 		if (v->vcpu_id == id) {
 			r = -EEXIST;
 			goto unlock_vcpu_destroy;
 		}
 
+	/*
+	 * kvm->vcpus[]数组包括该vm的所有vcpu，定义为KVM_MAX_VCPUS大小的数组。
+	 * 在kvm结构初始化时，其中所有成员都初始化为0，在vcpu还没有
+	 * 分配之前，如果不为0，那就是bug了。
+	 */
 	BUG_ON(kvm->vcpus[atomic_read(&kvm->online_vcpus)]);
 
 	/* Now it's all set up, let userspace reach it */
+	/* 增加kvm的引用计数 */
 	kvm_get_kvm(kvm);
+	/* 为新创建的vcpu创建对应的fd，以便于后续通过该fd进行ioctl操作 */
 	r = create_vcpu_fd(vcpu);
 	if (r < 0) {
 		kvm_put_kvm(kvm);
 		goto unlock_vcpu_destroy;
 	}
 
+	/* 将新创建的vcpu填入kvm->vcpus[]数组中 */
 	kvm->vcpus[atomic_read(&kvm->online_vcpus)] = vcpu;
+	/* 内存屏障，防止同时访问kvm结构时乱序 */
 	smp_wmb();
+	/* 增加online vcpu的数量 */
 	atomic_inc(&kvm->online_vcpus);
 
 	mutex_unlock(&kvm->lock);
+	/* 架构相关的善后工作，比如再次调用vcpu_load，以及tsc相关处理 */
 	kvm_arch_vcpu_postcreate(vcpu);
 	return r;
 
@@ -2039,6 +2112,11 @@ static int kvm_vcpu_ioctl_set_sigmask(struct kvm_vcpu *vcpu, sigset_t *sigset)
 	return 0;
 }
 
+/*
+  * kvm ioctl VCPU指令的入口，传入的fd为KVM_CREATE_VCPU中返回的fd。
+  * 主要针对具体的VCPU进行参数设置。如：相关寄存器的读
+  * 写、中断控制等
+  */
 static long kvm_vcpu_ioctl(struct file *filp,
 			   unsigned int ioctl, unsigned long arg)
 {
@@ -2063,15 +2141,21 @@ static long kvm_vcpu_ioctl(struct file *filp,
 		return kvm_arch_vcpu_ioctl(filp, ioctl, arg);
 #endif
 
-
+	/* KVM虚拟机VCPU数据结构载入物理CPU */
 	r = vcpu_load(vcpu);
 	if (r)
 		return r;
 	switch (ioctl) {
+	/* 
+     * 运行虚拟机，最终通过执行VMLAUNCH指令进入non root模式，
+     * 进入虚拟机运行。当虚拟机内部执行敏感指令时，由硬
+     * 件触发VM-exit，返回到root模式
+     */
 	case KVM_RUN:
 		r = -EINVAL;
 		if (arg)
 			goto out;
+		/* 运行VCPU(即运行虚拟机)的入口函数 */
 		r = kvm_arch_vcpu_ioctl_run(vcpu, vcpu->run);
 		trace_kvm_userspace_exit(vcpu->run->exit_reason, r);
 		break;
@@ -2439,6 +2523,13 @@ static long kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 	return kvm_vm_ioctl_check_extension(kvm, arg);
 }
 
+/*  
+ * kvm ioctl vm指令入口,主要用于针对VM虚拟机进行控制，如：内存设置、创建VCPU等。
+ * kvm_vm_ioctl()-->kvm_vm_ioctl_create_vcpu()-->kvm_arch_vcpu_create()
+ * -->kvm_x86_ops->vcpu_create()-->vmx_create_vcpu()
+ * kvm_vm_ioctl()-->kvm_vm_ioctl_create_vcpu()-->kvm_arch_vcpu_setup()
+ * -->kvm_mmu_setup()-->init_kvm_mmu()
+ */
 static long kvm_vm_ioctl(struct file *filp,
 			   unsigned int ioctl, unsigned long arg)
 {
@@ -2449,17 +2540,21 @@ static long kvm_vm_ioctl(struct file *filp,
 	if (kvm->mm != current->mm)
 		return -EIO;
 	switch (ioctl) {
+	/* 创建VCPU */
 	case KVM_CREATE_VCPU:
 		r = kvm_vm_ioctl_create_vcpu(kvm, arg);
 		break;
+	/* 建立guest物理地址空间中的内存区域与qemu-kvm虚拟地址空间中的内存区域的映射 */
 	case KVM_SET_USER_MEMORY_REGION: {
+		/* 存放内存区域信息的结构体，该内存区域从qemu-kvm进程的用户地址空间中分配 */
 		struct kvm_userspace_memory_region kvm_userspace_mem;
 
 		r = -EFAULT;
+		/* 从用户态拷贝相应数据到内核态，入参argp指向用户态地址 */
 		if (copy_from_user(&kvm_userspace_mem, argp,
 						sizeof kvm_userspace_mem))
 			goto out;
-
+		/* 进入实际处理流程 */
 		r = kvm_vm_ioctl_set_memory_region(kvm, &kvm_userspace_mem);
 		break;
 	}
@@ -3254,7 +3349,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 {
 	int r;
 	int cpu;
-
+	//体系结构相关的初始化设置
 	r = kvm_arch_init(opaque);
 	if (r)
 		goto out_fail;
@@ -3280,6 +3375,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 		goto out_free_0a;
 
 	for_each_online_cpu(cpu) {
+		// 对每个online cpu进行兼容性检查
 		smp_call_function_single(cpu,
 				kvm_arch_check_processor_compat,
 				&r, 1);
@@ -3287,14 +3383,18 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 			goto out_free_1;
 	}
 
+	// 注册cpu状态变化的回调函数
 	r = register_cpu_notifier(&kvm_cpu_notifier);
 	if (r)
 		goto out_free_2;
+	// 注册reboot时候的通知函数
 	register_reboot_notifier(&kvm_reboot_notifier);
 
 	/* A kmem cache lets us meet the alignment requirements of fx_save. */
 	if (!vcpu_align)
 		vcpu_align = __alignof__(struct kvm_vcpu);
+
+	// 创建vcpu 的 kmem cache, 对象大小是sizeof(struct vcpu_vmx)
 	kvm_vcpu_cache = kmem_cache_create("kvm_vcpu", vcpu_size, vcpu_align,
 					   0, NULL);
 	if (!kvm_vcpu_cache) {
@@ -3302,6 +3402,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 		goto out_free_3;
 	}
 
+	// 异步
 	r = kvm_async_pf_init();
 	if (r)
 		goto out_free;
@@ -3310,23 +3411,27 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 	kvm_vm_fops.owner = module;
 	kvm_vcpu_fops.owner = module;
 
+	// 注册字符设备文件/dev/kvm
 	r = misc_register(&kvm_dev);
 	if (r) {
 		printk(KERN_ERR "kvm: misc device register failed\n");
 		goto out_unreg;
 	}
 
+	// 注册系统核心函数, 这里是suspend和resume
 	register_syscore_ops(&kvm_syscore_ops);
 
 	kvm_preempt_ops.sched_in = kvm_sched_in;
 	kvm_preempt_ops.sched_out = kvm_sched_out;
 
+	// 初始化debugfs
 	r = kvm_init_debug();
 	if (r) {
 		printk(KERN_ERR "kvm: create debugfs files failed\n");
 		goto out_undebugfs;
 	}
 
+	// vfio的操作初始化
 	r = kvm_vfio_ops_init();
 	WARN_ON(r);
 

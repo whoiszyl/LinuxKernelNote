@@ -1419,6 +1419,7 @@ struct sock *tcp_v4_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	if (sk_acceptq_is_full(sk))
 		goto exit_overflow;
 
+	/* 创建并根据req的信息初始化sock， 进入TCP_SYN_RECV状态 */
 	newsk = tcp_create_openreq_child(sk, req, skb);
 	if (!newsk)
 		goto exit_nonewsk;
@@ -1453,6 +1454,7 @@ struct sock *tcp_v4_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	}
 	sk_setup_caps(newsk, dst);
 
+	/* 根据pmtu，rwnd来计算mss放到tp->mss_cache */
 	tcp_sync_mss(newsk, dst_mtu(dst));
 	newtp->advmss = dst_metric_advmss(dst);
 	if (tcp_sk(sk)->rx_opt.user_mss &&
@@ -1478,6 +1480,7 @@ struct sock *tcp_v4_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	}
 #endif
 
+	/* newsk也添加到bind hash bucket */
 	if (__inet_inherit_port(sk, newsk) < 0)
 		goto put_and_exit;
 	__inet_hash_nolisten(newsk, NULL);
@@ -1498,6 +1501,12 @@ put_and_exit:
 }
 EXPORT_SYMBOL(tcp_v4_syn_recv_sock);
 
+/* 
+ * 检查是否处于半连接，只要三次握手没有完成，这样的连接就称为半连接，
+ * 具体而言就是收到了SYN ，但还没有收到ACK的连接，所以对于这个查找函数，
+ * 如果是SYN报文，则会返回listen的socket(连接尚未创建)；如果是ACK报 文，
+ * 则会返回SYN报文处理中插入的半连接socket
+ */
 static struct sock *tcp_v4_hnd_req(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcphdr *th = tcp_hdr(skb);
@@ -1578,6 +1587,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	} else
 		sock_rps_save_rxhash(sk, skb);
 
+	/* 处理tcp状态机，根据child的状态来决定如何处理*/
 	if (tcp_rcv_state_process(sk, skb, tcp_hdr(skb), skb->len)) {
 		rsk = sk;
 		goto reset;
@@ -2547,8 +2557,10 @@ struct proto tcp_prot = { //接收的时候由tcp_protocol里面的recv函数跳转到这里面  
 	.sendpage		= tcp_sendpage,
 	.backlog_rcv		= tcp_v4_do_rcv,
 	.release_cb		= tcp_release_cb,
+	/* 把sock链入监听哈希表listening_hash，或者已建立连接的哈希表ehash */
 	.hash			= inet_hash,  //inet_create中执行  //将该传输控制块socket添加到tcp_hashinfo的对应hash中
 	.unhash			= inet_unhash,
+	/* TCP层bind()相关操作 */
 	.get_port		= inet_csk_get_port,
 	.enter_memory_pressure	= tcp_enter_memory_pressure,
 	.stream_memory_free	= tcp_stream_memory_free,

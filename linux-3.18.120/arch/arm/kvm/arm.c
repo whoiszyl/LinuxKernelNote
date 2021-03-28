@@ -1008,11 +1008,13 @@ int kvm_arch_init(void *opaque)
 	int err;
 	int ret, cpu;
 
+	//判断HYP模式是否可用
 	if (!is_hyp_mode_available()) {
 		kvm_err("HYP mode not available\n");
 		return -ENODEV;
 	}
 
+	//遍历所有CPU
 	for_each_online_cpu(cpu) {
 		smp_call_function_single(cpu, check_kvm_target_cpu, &ret, 1);
 		if (ret < 0) {

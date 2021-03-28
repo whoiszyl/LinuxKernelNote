@@ -28,16 +28,27 @@
 void sk_stream_write_space(struct sock *sk)
 {
 	struct socket *sock = sk->sk_socket;
+	/* 等待队列和异步通知队列 */
 	struct socket_wq *wq;
 
+	/* 如果剩余的发送缓存不低于发送缓存上限的1/3，且尚未发送的数据不高于一定值时 */
 	if (sk_stream_is_writeable(sk) && sock) {
+		/* 清除发送缓存不够的标志 */
 		clear_bit(SOCK_NOSPACE, &sock->flags);
 
 		rcu_read_lock();
+		/* socket的等待队列和异步通知队列 */
 		wq = rcu_dereference(sk->sk_wq);
 		if (wq_has_sleeper(wq))
+			/* 如果等待队列不为空，则唤醒一个睡眠进程 */
 			wake_up_interruptible_poll(&wq->wait, POLLOUT |
 						POLLWRNORM | POLLWRBAND);
+		
+        /* 
+         * 异步通知队列不为空，且允许发送数据时。
+         * 检测sock的发送队列是否曾经到达上限，如果有的话发送SIGIO信号，告知异步通知队列上
+         * 的进程有发送缓存可写。
+         */
 		if (wq && wq->fasync_list && !(sk->sk_shutdown & SEND_SHUTDOWN))
 			sock_wake_async(sock, SOCK_WAKE_SPACE, POLL_OUT);
 		rcu_read_unlock();

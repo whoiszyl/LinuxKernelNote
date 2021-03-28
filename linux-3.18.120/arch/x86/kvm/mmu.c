@@ -1933,7 +1933,9 @@ static struct kvm_mmu_page *kvm_mmu_get_page(struct kvm_vcpu *vcpu,
 		quadrant &= (1 << ((PT32_PT_BITS - PT64_PT_BITS) * level)) - 1;
 		role.quadrant = quadrant;
 	}
+	/* 根据一个hash索引来的 */
 	for_each_gfn_sp(vcpu->kvm, sp, gfn) {
+		/* 检查整个mmu ept是否被失效了 */
 		if (is_obsolete_sp(vcpu->kvm, sp))
 			continue;
 
@@ -1963,6 +1965,7 @@ static struct kvm_mmu_page *kvm_mmu_get_page(struct kvm_vcpu *vcpu,
 		return sp;
 	sp->gfn = gfn;
 	sp->role = role;
+	/* 新的mmu page加入hash索引，所以前面的for循环中才能知道gfn对应的mmu有没有被分配 */
 	hlist_add_head(&sp->hash_link,
 		&vcpu->kvm->arch.mmu_page_hash[kvm_page_table_hashfn(gfn)]);
 	if (!direct) {
@@ -2643,8 +2646,11 @@ static int __direct_map(struct kvm_vcpu *vcpu, gpa_t v, int write,
 	if (!VALID_PAGE(vcpu->arch.mmu.root_hpa))
 		return 0;
 
+	/* 遍历ept四级页表 */
 	for_each_shadow_entry(vcpu, (u64)gfn << PAGE_SHIFT, iterator) {
+		/* 如果是最后一级，level是hugepage下的level */
 		if (iterator.level == level) {
+			/* 设置pte，页表下一级的page地址就是pfn写入到pte */
 			mmu_set_spte(vcpu, iterator.sptep, ACC_ALL,
 				     write, &emulate, level, gfn, pfn,
 				     prefault, map_writable);
@@ -2654,15 +2660,18 @@ static int __direct_map(struct kvm_vcpu *vcpu, gpa_t v, int write,
 		}
 
 		drop_large_spte(vcpu, iterator.sptep);
+		/* mmu page不在位的情况，也就是缺页 */
 		if (!is_shadow_present_pte(*iterator.sptep)) {
 			u64 base_addr = iterator.addr;
 
+			/* 获取指向的具体mmu page entry的index */
 			base_addr &= PT64_LVL_ADDR_MASK(iterator.level);
 			pseudo_gfn = base_addr >> PAGE_SHIFT;
+			/* 获取mmu page*/
 			sp = kvm_mmu_get_page(vcpu, pseudo_gfn, iterator.addr,
 					      iterator.level - 1,
 					      1, ACC_ALL, iterator.sptep);
-
+			/* 将当前的mmu page的地址写入到上一级别mmu page的pte中 */
 			link_shadow_page(iterator.sptep, sp, true);
 		}
 	}
@@ -3361,11 +3370,12 @@ static int tdp_page_fault(struct kvm_vcpu *vcpu, gva_t gpa, u32 error_code,
 		if (likely(r != RET_MMIO_PF_INVALID))
 			return r;
 	}
-
+	/* 填充kvm mmu专用的slab */
 	r = mmu_topup_memory_caches(vcpu);
 	if (r)
 		return r;
 
+	/* 获取gfn使用的level，即hugepage的问题 */
 	force_pt_level = mapping_level_dirty_bitmap(vcpu, gfn);
 	if (likely(!force_pt_level)) {
 		level = mapping_level(vcpu, gfn);
@@ -3858,12 +3868,19 @@ static void init_kvm_nested_mmu(struct kvm_vcpu *vcpu)
 
 static void init_kvm_mmu(struct kvm_vcpu *vcpu)
 {
+	/* NPT(Nested page table，AMD x86硬件提供的内存虚拟化技术，
+	 * 相当于Intel中的EPT技术)相关初始化
+	 */
 	if (mmu_is_nested(vcpu))
 		return init_kvm_nested_mmu(vcpu);
-	else if (tdp_enabled)
-		return init_kvm_tdp_mmu(vcpu);
+	/* 
+     * EPT(Extended page table，Intel x86硬件提供的内存虚拟化技术)相关初始化
+     * 主要是设置一些函数指针，其中比较重要的如缺页异常处理函数
+     */
+	else if (tdp_enabled)//是否支持EPT
+		return init_kvm_tdp_mmu(vcpu);//EPT初始化方式
 	else
-		return init_kvm_softmmu(vcpu);
+		return init_kvm_softmmu(vcpu);//影子页表(软件实现内存虚拟化技术)初始化方式
 }
 
 void kvm_mmu_reset_context(struct kvm_vcpu *vcpu)
@@ -4500,21 +4517,23 @@ static void mmu_destroy_caches(void)
 
 int kvm_mmu_module_init(void)
 {
+	// cache 初始化
 	pte_list_desc_cache = kmem_cache_create("pte_list_desc",
 					    sizeof(struct pte_list_desc),
 					    0, 0, NULL);
 	if (!pte_list_desc_cache)
 		goto nomem;
-
+	//cache 初始化
 	mmu_page_header_cache = kmem_cache_create("kvm_mmu_page_header",
 						  sizeof(struct kvm_mmu_page),
 						  0, 0, NULL);
 	if (!mmu_page_header_cache)
 		goto nomem;
-
+	// percpu的mmu pages使用计数
 	if (percpu_counter_init(&kvm_total_used_mmu_pages, 0, GFP_KERNEL))
 		goto nomem;
 
+	// 预分配
 	register_shrinker(&mmu_shrinker);
 
 	return 0;

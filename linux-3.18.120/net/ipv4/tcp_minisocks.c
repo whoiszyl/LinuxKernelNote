@@ -498,6 +498,7 @@ static void tcp_ecn_openreq_child(struct tcp_sock *tp,
  */
 struct sock *tcp_create_openreq_child(struct sock *sk, struct request_sock *req, struct sk_buff *skb)
 {
+	/*  分配一个struct tcp_sock结构，返回嵌套其中的sock结构 */
 	struct sock *newsk = inet_csk_clone_lock(sk, req, GFP_ATOMIC);
 
 	if (newsk != NULL) {
@@ -877,7 +878,12 @@ EXPORT_SYMBOL(tcp_check_req);
  * locked is obtained, other packets cause the same connection to
  * be created.
  */
-
+/*
+ * 如果此时sock: child被用户进程锁住了，那么就先添加到backlog中__sk_add_backlog()，
+ * 待解锁时再处理backlog上的sock；如果此时没有被锁住，
+ * 则先调用tcp_rcv_state_process()进行处理，处理完后，如果child状态到达TCP_ESTABLISHED，
+ * 则表明其已就绪，调用sk_data_ready()唤醒等待在isck_accept_queue上的函数accept()。
+ */
 int tcp_child_process(struct sock *parent, struct sock *child,
 		      struct sk_buff *skb)
 {
@@ -897,7 +903,7 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 		 * in main socket hash table and lock on listening
 		 * socket does not protect us more.
 		 */
-		 /* 添加到backlog队列中，缓存该skb后续处理 */
+		 /* 用户进程在处理，则挂到backlog上，等用户进程release_sock是否锁的时候在进程上下文中处理 */
 		__sk_add_backlog(child, skb);
 	}
 

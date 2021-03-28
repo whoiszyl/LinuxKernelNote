@@ -423,6 +423,7 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
 
+	/* 检查参数和权限 */
 	ret = rw_verify_area(READ, file, pos, count);
 	if (ret >= 0) {
 		count = ret;
@@ -433,9 +434,12 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 		else
 			ret = new_sync_read(file, buf, count, pos);
 		if (ret > 0) {
+			/* fsnotify机制进行通知 */
 			fsnotify_access(file);
+			/* 审计信息 */
 			add_rchar(current, ret);
 		}
+		/* 审计信息 */
 		inc_syscr(current);
 	}
 

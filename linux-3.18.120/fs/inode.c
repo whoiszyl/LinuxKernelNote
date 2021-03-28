@@ -205,14 +205,16 @@ static struct inode *alloc_inode(struct super_block *sb)
 {
 	struct inode *inode;
 
+	/* 用于申请空间 */
 	if (sb->s_op->alloc_inode)
+		/* sb:sock_mnt->mnt_sb ，所以sb->s_op->alloc_inode(sb)指向sockfs_ops的操作函数sock_alloc_inode */
 		inode = sb->s_op->alloc_inode(sb);
 	else
 		inode = kmem_cache_alloc(inode_cachep, GFP_KERNEL);
 
 	if (!inode)
 		return NULL;
-
+	/* 初始化inode，记录所属sb，初始inode的uid,gid，各种标志，默认操作等 */
 	if (unlikely(inode_init_always(sb, inode))) {
 		if (inode->i_sb->s_op->destroy_inode)
 			inode->i_sb->s_op->destroy_inode(inode);
@@ -871,6 +873,7 @@ struct inode *new_inode_pseudo(struct super_block *sb)
 
 	if (inode) {
 		spin_lock(&inode->i_lock);
+		/* 设置i_ino和i_state的值 */
 		inode->i_state = 0;
 		spin_unlock(&inode->i_lock);
 		INIT_LIST_HEAD(&inode->i_sb_list);

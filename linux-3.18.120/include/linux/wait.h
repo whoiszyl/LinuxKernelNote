@@ -19,8 +19,11 @@ int default_wake_function(wait_queue_t *wait, unsigned mode, int flags, void *ke
 
 struct __wait_queue {
 	unsigned int		flags;
+	/* 指向当前的进程控制块 */
 	void			*private;
+	/* 唤醒函数 */
 	wait_queue_func_t	func;
+	/* 用于链接入等待队列 */
 	struct list_head	task_list;
 };
 
@@ -40,6 +43,7 @@ struct __wait_queue_head {
 	spinlock_t		lock;
 	struct list_head	task_list;
 };
+/* 等待队列头 */
 typedef struct __wait_queue_head wait_queue_head_t;
 
 struct task_struct;

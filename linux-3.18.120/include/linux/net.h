@@ -87,8 +87,11 @@ enum sock_shutdown_cmd {
 
 struct socket_wq {
 	/* Note: wait MUST be first field of socket_wq */
+	/* 等待队列 */
 	wait_queue_head_t	wait;
+	/* 异步通知队列 */
 	struct fasync_struct	*fasync_list;
+	/* 更新时的回调函数 */
 	struct rcu_head		rcu;
 } ____cacheline_aligned_in_smp;
 
@@ -204,9 +207,13 @@ struct iovec;
 struct kvec;
 
 enum {
+	/* 直接发送SIGIO信号 */
 	SOCK_WAKE_IO,
+	/* 检测应用程序是否通过recv()类调用来等待接收数据，如果没有才发送SIGIO信号 */
 	SOCK_WAKE_WAITD,
+	/* 检测sock的发送队列是否曾经到达上限，如果有的话发送SIGIO信号 */
 	SOCK_WAKE_SPACE,
+	/* 直接发送SIGURG信号 */
 	SOCK_WAKE_URG,
 };
 

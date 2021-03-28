@@ -267,6 +267,7 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		err = filp->f_flags;
 		break;
 	case F_SETFL:
+		/* 在这里设置O_ASYNC标志 */
 		err = setfl(fd, filp, arg);
 		break;
 #if BITS_PER_LONG != 32
@@ -305,6 +306,7 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		err = f_getown_ex(filp, arg);
 		break;
 	case F_SETOWN_EX:
+		/* 在这里设置所有者进程 */
 		err = f_setown_ex(filp, arg);
 		break;
 	case F_GETOWNER_UIDS:
@@ -372,6 +374,7 @@ SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 
 	err = security_file_fcntl(f.file, cmd, arg);
 	if (!err)
+		/* 实际的处理函数 */
 		err = do_fcntl(fd, cmd, arg, f.file);
 
 out1:
@@ -712,14 +715,17 @@ static void kill_fasync_rcu(struct fasync_struct *fa, int sig, int band)
 		}
 		spin_lock_irqsave(&fa->fa_lock, flags);
 		if (fa->fa_file) {
+			/* 持有文件的进程 */
 			fown = &fa->fa_file->f_owner;
 			/* Don't send SIGURG to processes which have not set a
 			   queued signum: SIGURG has its own default signalling
 			   mechanism. */
 			if (!(sig == SIGURG && fown->signum == 0))
+				/* 发送信号给持有文件的进程 */
 				send_sigio(fown, fa->fa_fd, band);
 		}
 		spin_unlock_irqrestore(&fa->fa_lock, flags);
+		/* 指向下一个异步通知结构体 */
 		fa = rcu_dereference(fa->fa_next);
 	}
 }

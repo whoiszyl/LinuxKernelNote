@@ -405,6 +405,7 @@ static void tcp_probe_timer(struct sock *sk) ////tcp_write_timer包括数据报重传tc
 		 */
 		max_probes = tcp_orphan_retries(sk, alive);
 		if (!alive && icsk->icsk_backoff >= max_probes)
+			goto abort;
         /*
 		 * 释放资源，如果该套接字在释放过程中被关闭，
 		 * 就无需再发送持续探测段了。

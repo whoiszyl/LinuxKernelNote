@@ -2868,6 +2868,7 @@ int skb_append_datato_frags(struct sock *sk, struct sk_buff *skb,
 		/* copy the user data to page */
 		copy = min_t(int, length, pfrag->size - pfrag->offset);
 
+		/* ip_generic_getfrag */
 		ret = getfrag(from, page_address(pfrag->page) + pfrag->offset,
 			      offset, copy, 0, skb);
 		if (ret < 0)

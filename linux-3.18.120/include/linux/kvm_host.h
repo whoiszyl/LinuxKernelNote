@@ -228,12 +228,21 @@ struct kvm_mmio_fragment {
 	unsigned len;
 };
 
+/*
+ * 在用户通过KVM_CREATE_VCPU系统调用请求创建vCPU之后，
+ * KVM子模块讲创建kvm_vcpu结构体并进行初始化操作，然后返回对应的vcpu_fd描述符。
+ * 在KVM的内部虚拟机调度中，kvm_vcpu和KVM中的相关数据进行操作
+ */
 struct kvm_vcpu {
 	struct kvm *kvm;
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	struct preempt_notifier preempt_notifier;
 #endif
 	int cpu;
+
+	/*
+	 * 对应的CPU的ID。
+	 */
 	int vcpu_id;
 	int srcu_idx;
 	int mode;
@@ -241,6 +250,10 @@ struct kvm_vcpu {
 	unsigned long guest_debug;
 
 	struct mutex mutex;
+	
+	/*
+	 * vCPU的运行时参数，其中保存了寄存器信息、内存信息、虚拟机状态等各种动态信息。
+	 */
 	struct kvm_run *run;
 
 	int fpu_active;
@@ -252,6 +265,7 @@ struct kvm_vcpu {
 	struct kvm_vcpu_stat stat;
 
 #ifdef CONFIG_HAS_IOMEM
+	/*  mmio相关部分 */
 	int mmio_needed;
 	int mmio_read_completed;
 	int mmio_is_write;
@@ -282,6 +296,10 @@ struct kvm_vcpu {
 	} spin_loop;
 #endif
 	bool preempted;
+
+	/*
+	* 存储有KVM虚拟机的运行时参数，如定时器、中断、内存槽等方面的信息。
+	*/
 	struct kvm_vcpu_arch arch;
 };
 
@@ -296,11 +314,24 @@ static inline int kvm_vcpu_exiting_guest_mode(struct kvm_vcpu *vcpu)
  */
 #define KVM_MEM_MAX_NR_PAGES ((1UL << 31) - 1)
 
+/*
+ * 由于GPA不能直接用于物理 MMU 进行寻址，所以需要将GPA转换为HVA，
+ * kvm中利用 kvm_memory_slot 数据结构来记录每一个地址区间(Guest中的物理
+ * 地址区间)中GPA与HVA的映射关系
+ */
 struct kvm_memory_slot {
+	/* 虚拟机物理地址(即GPA)对应的页框号 */
 	gfn_t base_gfn;
+	/* 当前slot中包含的page数 */
 	unsigned long npages;
+	/* 脏页位图 */
 	unsigned long *dirty_bitmap;
+	/* 架构相关的部分 */
 	struct kvm_arch_memory_slot arch;
+	/* 
+     * GPA对应的Host虚拟地址(HVA)，由于虚拟机都运行在qemu的地址空间中
+     * 而qemu是用户态程序，所以通常使用根模式下用户地址空间。
+     */
 	unsigned long userspace_addr;
 	u32 flags;
 	short id;
@@ -356,22 +387,50 @@ struct kvm_memslots {
 	short id_to_index[KVM_MEM_SLOTS_NUM];
 };
 
+/*
+ * 一个结构体代表一个虚拟机，通过VM_CREATE_KVM指令创建的就是该结构体的对象
+ * 包含vCPU、内存、APIC、IRQ、MMU、Event事件管理等信息，用于跟踪虚拟机状态
+ */
 struct kvm {
+	/* 用于保护mmu的spin_lock */
 	spinlock_t mmu_lock;
 	struct mutex slots_lock;
+	/* 指向qemu用户态进程的mm_struct */
 	struct mm_struct *mm; /* userspace tied to this vm */
+	/*
+	 * KVM虚拟机所分配到的内存slot，以数组形式存储这些slot的地址信息。
+	 * 由于客户机物理地址不能直接用于宿主机物理 MMU 进行寻址，
+	 * 所以需要把客户机物理地址转换成宿主机虚拟地址 (Host Virtual Address, HVA)，
+	 * 为此，KVM 用一个 kvm_memory_slot 数据结构来记录每一个地址区间的映射关系，
+	 * 此数据结构包含了对应此映射区间的起始客户机页帧号 (Guest Frame Number, GFN)，
+	 * 映射的内存页数目以及起始宿主机虚拟地址。
+	 * 于是 KVM 就可以实现对客户机物理地址到宿主机虚拟地址之间的转换，
+	 * 也即首先根据客户机物理地址找到对应的映射区间，
+	 * 然后根据此客户机物理地址在此映射区间的偏移量就可以得到其对应的宿主机虚拟地址。
+	 * 进而再通过宿主机的页表也可实现客户机物理地址到宿主机物理地址之间的转换，
+	 * 也即 GPA 到 HPA 的转换。
+	 */
 	struct kvm_memslots *memslots;
 	struct srcu_struct srcu;
 	struct srcu_struct irq_srcu;
 #ifdef CONFIG_KVM_APIC_ARCHITECTURE
 	u32 bsp_vcpu_id;
 #endif
+	/*
+	 * KVM虚拟机中包含的vCPU结构体，一个虚拟机CPU对应一个vCPU结构体。
+	 */
 	struct kvm_vcpu *vcpus[KVM_MAX_VCPUS];
+	/* online的vcpu数量 */
 	atomic_t online_vcpus;
 	int last_boosted_vcpu;
+	/* HOST上VM管理链表 */
 	struct list_head vm_list;
 	struct mutex lock;
+	/*
+	 * KVM虚拟机中的I/O总线，一条总线对应一个kvm_io_bus结构体，如ISA总线、PCI总线。
+	 */
 	struct kvm_io_bus *buses[KVM_NR_BUSES];
+	/* 事件通道相关 */
 #ifdef CONFIG_HAVE_KVM_EVENTFD
 	struct {
 		spinlock_t        lock;
@@ -381,8 +440,17 @@ struct kvm {
 	} irqfds;
 	struct list_head ioeventfds;
 #endif
+
+	/*
+	 * KVM虚拟机中的页表、MMU等运行时的状态信息。
+	 */
 	struct kvm_vm_stat stat;
+
+	/*
+	 * KVM的软件arch方面所需要的一些参数。
+	 */
 	struct kvm_arch arch;
+	/* 引用计数 */
 	atomic_t users_count;
 #ifdef KVM_COALESCED_MMIO_PAGE_OFFSET
 	struct kvm_coalesced_mmio_ring *coalesced_mmio_ring;
@@ -390,6 +458,7 @@ struct kvm {
 	struct list_head coalesced_zones;
 #endif
 
+	/* irq相关部分 */
 	struct mutex irq_lock;
 #ifdef CONFIG_HAVE_KVM_IRQCHIP
 	/*
@@ -403,10 +472,12 @@ struct kvm {
 #endif
 
 #if defined(CONFIG_MMU_NOTIFIER) && defined(KVM_ARCH_WANT_MMU_NOTIFIER)
+	/* mmu通知链 */
 	struct mmu_notifier mmu_notifier;
 	unsigned long mmu_notifier_seq;
 	long mmu_notifier_count;
 #endif
+	/* dirty TLB数量 */
 	long tlbs_dirty;
 	struct list_head devices;
 };
